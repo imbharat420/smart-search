@@ -1,0 +1,213 @@
+@import 'tailwindcss';
+
+/*
+  TravelIQ design tokens.
+
+  The palette is a five-colour brief — platinum, soft periwinkle, periwinkle,
+  tea green and lime cream — with lime cream as the main brand colour. Two hues
+  carry the whole interface:
+
+    lime family      brand, action, positive  (fills, pills, pins, availability)
+    periwinkle family state, inference, focus (focus ring, active nav, the
+                                               "keyword fallback" chip)
+
+  Every given colour is used at full strength somewhere. Three shades are derived
+  because a palette of light tints cannot carry text: --lime-ink and
+  --periwinkle-ink are the same hues pushed to AA on white, and --ink is the
+  near-black. One colour is added — --destructive — because nothing in a
+  five-tint palette can signal an error, and red is the only convention users
+  read instantly.
+
+  Nothing in src/** carries a raw colour value; components use these tokens.
+*/
+@theme {
+  --font-display: 'Plus Jakarta Sans', ui-sans-serif, system-ui, 'Segoe UI', Roboto, sans-serif;
+  --font-sans: var(--font-display);
+}
+
+/* `inline` so the colour utilities resolve straight to the :root tokens below. */
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-panel: var(--panel);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-strong: var(--primary-strong);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-ink: var(--ink);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+}
+
+:root {
+  --radius: 0.9rem;
+
+  /* The five given colours, unchanged. */
+  --platinum: #ebebeb;
+  --soft-periwinkle: #9287e2;
+  --periwinkle: #a8adf0;
+  --tea-green: #d0f0a8;
+  --lime-cream: #c8e98a;
+
+  /* Derived shades: the same hues, dark enough to carry text and icons. */
+  --lime-ink: #5c7d2a; /* 4.6:1 on white */
+  --periwinkle-ink: #5f52b8; /* 5.3:1 on white */
+  --ink: #191823; /* indigo-black, 17.6:1 on white */
+
+  --background: #ffffff;
+  --panel: #f7f8f2; /* lime cream at ~6% — the second column and section bands */
+  --card: #ffffff;
+  --card-foreground: var(--ink);
+  --popover: #ffffff;
+  --popover-foreground: var(--ink);
+  --foreground: var(--ink);
+
+  --muted: #f4f4f7;
+  --muted-foreground: #5a5a68; /* 6.8:1 on white, 6.3:1 on --panel */
+
+  /* Main brand. A light tint: fills and pills only, never text or a hairline. */
+  --primary: var(--lime-cream);
+  --primary-foreground: #23300f; /* 10.3:1 on lime cream */
+  --primary-strong: var(--lime-ink); /* brand as ink: stars, saved hearts, meters */
+  --secondary: var(--tea-green);
+  --secondary-foreground: #23300f;
+  --accent: #e8f7d3; /* tea green at 45% on white — hover and soft fills */
+  --accent-foreground: #23300f;
+
+  --success: #4f7a3a; /* lime family, 5.0:1 — availability dots and confirmations */
+  --success-foreground: #ffffff;
+  --warning: var(--soft-periwinkle); /* inferred, pending, keyword fallback */
+  --warning-foreground: #1b1636; /* 5.7:1 on soft periwinkle */
+  --destructive: #c2415a; /* the one addition — errors need red */
+  --destructive-foreground: #ffffff;
+
+  --border: var(--platinum);
+  --input: var(--platinum);
+  --ring: var(--soft-periwinkle); /* 3.1:1 on white, and legible over lime fills */
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #5a5a68;
+  --sidebar-accent: #eceefb; /* periwinkle at 30% — the active nav wash */
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: var(--platinum);
+}
+
+@layer base {
+  /* Tailwind v4 defaults `border` to currentColor; the hairline is the token. */
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    min-height: 100vh;
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-display);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: var(--primary);
+    color: var(--primary-foreground);
+  }
+}
+
+/* Streaming caret + list entrance, both used by the assistant. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+.animate-rise {
+  animation: rise 0.24s ease-out both;
+}
+
+.caret {
+  display: inline-block;
+  width: 0.5ch;
+  animation: blink 1s step-end infinite;
+}
+
+/* Horizontal rails scroll; their scrollbar should not shout. */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: 9999px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise,
+  .caret {
+    animation: none;
+  }
+}
