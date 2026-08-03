@@ -17,7 +17,7 @@ from typing import Any, AsyncGenerator, Callable, Optional
 from .config import settings
 from .providers import PROVIDERS, ProviderSpec, SimBand
 
-log = logging.getLogger("shopsense.llm")
+log = logging.getLogger("smartsearch.llm")
 
 
 class NoProviderConfigured(RuntimeError):
@@ -221,5 +221,8 @@ async def _embed_with(provider: Provider, texts: list[str], input_type: str) -> 
             # passage text differently.
             kwargs["extra_body"] = {"input_type": input_type, "truncate": "END"}
         resp = await client.embeddings.create(**kwargs)
-        out.extend(item.embedding for item in sorted(resp.data, key=lambda d: d.index))
+        items = resp.data
+        if all(item.index is not None for item in items):
+            items = sorted(items, key=lambda d: d.index)
+        out.extend(item.embedding for item in items)
     return out

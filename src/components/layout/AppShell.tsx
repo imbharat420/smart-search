@@ -15,7 +15,7 @@ export function AppShell() {
         <main className="min-w-0 flex-1">
           <Outlet />
         </main>
-        {showFooter && <SiteFooter />}
+        {/* {showFooter && <SiteFooter />} */}
       </div>
       <BottomTabs />
     </div>

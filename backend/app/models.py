@@ -182,7 +182,7 @@ class Trip(Base, TimestampMixin):
     currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="GBP")
     rating: Mapped[Decimal] = mapped_column(Numeric(3, 2), nullable=False, server_default="0")
     review_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    climate: Mapped[str] = mapped_column(String(8), nullable=False)
+    climate: Mapped[str] = mapped_column(String(32), nullable=False)
     direct_flights: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     group_size_max: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     available: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
@@ -302,7 +302,7 @@ class Poi(Base, TimestampMixin):
     category: Mapped[str] = mapped_column(String(24), nullable=False)
     location: Mapped[str] = mapped_column(String(200), nullable=False)
     rating: Mapped[Optional[Decimal]] = mapped_column(Numeric(3, 2))
-    price_band: Mapped[Optional[str]] = mapped_column(String(8))  # '£' .. '££££'
+    price_band: Mapped[Optional[str]] = mapped_column(String(20))  # e.g. '££', '£38/night', 'From £9'
     lat: Mapped[Decimal] = mapped_column(Numeric(9, 6), nullable=False)
     lng: Mapped[Decimal] = mapped_column(Numeric(9, 6), nullable=False)
     image_url: Mapped[str] = mapped_column(Text, nullable=False)
@@ -439,7 +439,7 @@ class Promotion(Base):
     trip_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("trips.id", ondelete="CASCADE"), nullable=False
     )
-    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
     weight: Mapped[Decimal] = mapped_column(Numeric(4, 2), nullable=False, server_default="1")
     starts_at: Mapped[Optional[datetime]] = mapped_column()
     ends_at: Mapped[Optional[datetime]] = mapped_column()

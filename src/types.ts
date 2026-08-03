@@ -181,6 +181,11 @@ export interface UiMessage {
   trips?: Trip[]
   citations?: Citation[]
   streaming?: boolean
+  // "near me" handling (src/lib/nearMe.ts) is a client-side shortcut around the
+  // place index, not part of the streamed trip-chat contract — set at most one
+  // of the two below at a time.
+  places?: Place[]
+  needsLocation?: { radiusKm: number; radiusMiles: number }
 }
 
 // ---- admin + analytics ----

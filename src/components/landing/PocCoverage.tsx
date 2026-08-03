@@ -57,13 +57,13 @@ export function PocCoverage() {
           ))}
         </div>
 
-        <p className="mt-10 text-sm text-muted-foreground">
+        {/* <p className="mt-10 text-sm text-muted-foreground">
           The panel that drives all of it is at{' '}
           <Link to="/admin" className="font-semibold text-foreground hover:underline">
             the control panel
           </Link>
           , open without sign-in for this POC.
-        </p>
+        </p> */}
       </div>
     </section>
   )

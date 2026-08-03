@@ -1,23 +1,25 @@
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { Compass, LocateFixed } from 'lucide-react'
 import { toast } from 'sonner'
 import type { Place } from '../types'
 import { api } from '../lib/api'
+import type { Coords } from '../lib/geo'
+import { milesBetween } from '../lib/geo'
 import { usePageMeta } from '../lib/meta'
 import { cn } from '../lib/utils'
+import { getStoredOrigin, setStoredOrigin } from '../lib/originStore'
 import { Button } from '../components/ui/button'
 import { Chip } from '../components/ui/chip'
 import { Empty } from '../components/ui/empty'
 import { LocationField } from '../components/discover/LocationField'
-import { MAX_PINS, MapPanel } from '../components/discover/MapPanel'
+import { MAX_PINS } from '../components/discover/constants'
 import { PlaceRail } from '../components/discover/PlaceRail'
 import { PlaceSheet } from '../components/discover/PlaceSheet'
 import { RadiusControl } from '../components/discover/RadiusControl'
 
-interface Coords {
-  lat: number
-  lng: number
-}
+// mapbox-gl is a heavy dependency (~700 kB gzip) that only this page needs, so
+// it loads as its own chunk instead of sitting in every route's bundle.
+const MapPanel = lazy(() => import('../components/discover/MapPanel'))
 
 const RAILS: { category: Place['category']; title: string; nothing: string }[] = [
   {
@@ -29,17 +31,6 @@ const RAILS: { category: Place['category']; title: string; nothing: string }[] =
   { category: 'stays', title: 'Stays', nothing: 'No hotels or guesthouses are indexed' },
 ]
 
-function milesBetween(from: Coords, to: Coords): number {
-  const earthRadiusMiles = 3958.8
-  const toRad = (deg: number) => (deg * Math.PI) / 180
-  const dLat = toRad(to.lat - from.lat)
-  const dLng = toRad(to.lng - from.lng)
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(from.lat)) * Math.cos(toRad(to.lat)) * Math.sin(dLng / 2) ** 2
-  return 2 * earthRadiusMiles * Math.asin(Math.sqrt(a))
-}
-
 export function Discover() {
   usePageMeta(
     'Location discovery — TravelIQ',
@@ -49,7 +40,9 @@ export function Discover() {
   const [where, setWhere] = useState('Jaipur')
   const [query, setQuery] = useState('Jaipur')
   const [radius, setRadius] = useState(25)
-  const [origin, setOrigin] = useState<Coords | null>(null)
+  // The assistant chat can also collect a shared location — reusing it here
+  // means granting it once (in either place) covers both.
+  const [origin, setOrigin] = useState<Coords | null>(() => getStoredOrigin())
   const [locating, setLocating] = useState(false)
   const [places, setPlaces] = useState<Place[] | null>(null)
   const [busy, setBusy] = useState(false)
@@ -131,7 +124,9 @@ export function Discover() {
     navigator.geolocation.getCurrentPosition(
       (position) => {
         setLocating(false)
-        setOrigin({ lat: position.coords.latitude, lng: position.coords.longitude })
+        const here = { lat: position.coords.latitude, lng: position.coords.longitude }
+        setOrigin(here)
+        setStoredOrigin(here)
         toast.success('Using your device location', {
           description: 'Distances are measured from where you are.',
         })
@@ -231,14 +226,16 @@ export function Discover() {
 
       <aside className="relative hidden bg-accent lg:block">
         <div className="sticky top-0 h-screen">
-          <MapPanel
-            places={near}
-            origin={origin}
-            radiusMiles={radius}
-            hoveredId={hovered}
-            onHover={setHovered}
-            onSelect={setActive}
-          />
+          <Suspense fallback={<div className="h-full w-full animate-pulse bg-accent" />}>
+            <MapPanel
+              places={near}
+              origin={origin}
+              radiusMiles={radius}
+              hoveredId={hovered}
+              onHover={setHovered}
+              onSelect={setActive}
+            />
+          </Suspense>
         </div>
       </aside>
 

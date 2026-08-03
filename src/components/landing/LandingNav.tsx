@@ -9,7 +9,7 @@ const sections = [
 
 const pages = [
   { label: 'Guides', to: '/inspiration' },
-  { label: 'Control panel', to: '/admin' },
+  // { label: 'Control panel', to: '/admin' },
 ]
 
 export function LandingNav() {

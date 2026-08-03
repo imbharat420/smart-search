@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
+import type { Coords } from '../lib/geo'
+import { milesBetween } from '../lib/geo'
 import { usePageMeta } from '../lib/meta'
+import type { NearMeIntent } from '../lib/nearMe'
+import { parseNearMe } from '../lib/nearMe'
+import { getStoredOrigin, setStoredOrigin } from '../lib/originStore'
 import type { ChatMessage, Guide, ParsedQuery, Trip } from '../types'
 import { ChatBubble } from '../components/chat/ChatBubble'
 import type { ThreadMessage } from '../components/chat/ChatBubble'
@@ -9,6 +14,8 @@ import { DiscoveryRails } from '../components/chat/DiscoveryRails'
 import { ModelPill } from '../components/chat/ModelPill'
 import { SuggestedPrompts } from '../components/chat/SuggestedPrompts'
 import { parsedToFilters } from '../components/chat/parsedFilters'
+
+const NEARBY_RESULT_LIMIT = 6
 
 type HealthSnapshot = Awaited<ReturnType<typeof api.health>>
 
@@ -28,6 +35,8 @@ export function Assistant() {
   const [busy, setBusy] = useState(false)
   const [health, setHealth] = useState<HealthSnapshot | null>(null)
   const [rails, setRails] = useState<{ trips: Trip[]; guides: Guide[] } | null>(null)
+  // Shared with Discover.tsx via localStorage, so granting location once covers both.
+  const [origin, setOrigin] = useState<Coords | null>(() => getStoredOrigin())
 
   const end = useRef<HTMLDivElement>(null)
   const pinned = useRef(true)
@@ -82,16 +91,48 @@ export function Assistant() {
     patch(id, (message) => ({ ...message, matchTotal: response.total }))
   }
 
+  // "Near me" bypasses the LLM entirely — it is a place-index lookup, not a
+  // trip question, and the place index is the same one Discover.tsx reads.
+  // /places has no notion of the reader's real coordinates (its own `radius`
+  // narrows against each place's distance from a destination centre), so the
+  // real distance is computed here exactly like Discover.tsx's `near` filter.
+  async function answerNearby(id: string, here: Coords, radiusKm: number, radiusMiles: number) {
+    const all = await api.places({})
+    const nearby = all
+      .map((place) => ({
+        ...place,
+        distanceMiles: Math.round(milesBetween(here, place) * 10) / 10,
+      }))
+      .filter((place) => place.distanceMiles <= radiusMiles)
+      .sort((a, b) => a.distanceMiles - b.distanceMiles)
+      .slice(0, NEARBY_RESULT_LIMIT)
+
+    const radiusLabel = `${Math.round(radiusKm)} km`
+    patch(id, (message) => ({
+      ...message,
+      content:
+        nearby.length === 0
+          ? `Nothing in the place index falls within ${radiusLabel} of your location. Try a wider radius, or open Discover to search a different area.`
+          : `Here's what's within ${radiusLabel} of your location, closest first:`,
+      places: nearby,
+      needsLocation: undefined,
+      streaming: false,
+    }))
+  }
+
+  function handleShareLocation(replyId: string, shared: Coords, intent: NearMeIntent) {
+    setOrigin(shared)
+    setStoredOrigin(shared)
+    patch(replyId, (message) => ({ ...message, streaming: true }))
+    void answerNearby(replyId, shared, intent.radiusKm, intent.radiusMiles)
+  }
+
   async function send(text: string) {
     const question = text.trim()
     if (!question || busy) return
 
     const replyId = `a${++seq.current}`
-    // Built before the optimistic append so the empty placeholder never reaches the model.
-    const wire: ChatMessage[] = [
-      ...messages.map((message) => ({ role: message.role, content: message.content })),
-      { role: 'user', content: question },
-    ]
+    const nearMe = parseNearMe(question)
 
     setMessages((prev) => [
       ...prev,
@@ -101,6 +142,29 @@ export function Assistant() {
     setDraft('')
     setBusy(true)
     pinned.current = true
+
+    if (nearMe) {
+      const here = origin ?? getStoredOrigin()
+      if (here) {
+        await answerNearby(replyId, here, nearMe.radiusKm, nearMe.radiusMiles)
+      } else {
+        patch(replyId, (message) => ({
+          ...message,
+          content:
+            "I can pull up places near you, but I need your location first — share it, or name a neighbourhood or landmark instead.",
+          needsLocation: { radiusKm: nearMe.radiusKm, radiusMiles: nearMe.radiusMiles },
+          streaming: false,
+        }))
+      }
+      setBusy(false)
+      return
+    }
+
+    // Built before the optimistic append so the empty placeholder never reaches the model.
+    const wire: ChatMessage[] = [
+      ...messages.map((message) => ({ role: message.role, content: message.content })),
+      { role: 'user', content: question },
+    ]
 
     try {
       for await (const chunk of api.chat(wire)) {
@@ -175,7 +239,14 @@ export function Assistant() {
             <ol className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-4">
               {messages.map((message) => (
                 <li key={message.id}>
-                  <ChatBubble message={message} />
+                  <ChatBubble
+                    message={message}
+                    onShareLocation={
+                      message.needsLocation
+                        ? (shared) => handleShareLocation(message.id, shared, message.needsLocation!)
+                        : undefined
+                    }
+                  />
                 </li>
               ))}
             </ol>
@@ -188,6 +259,7 @@ export function Assistant() {
             value={draft}
             onChange={setDraft}
             onSend={() => void send(draft)}
+            onNearMe={() => void send('Places near me')}
             busy={busy}
           />
           <p className="mt-2 text-center text-xs text-muted-foreground">

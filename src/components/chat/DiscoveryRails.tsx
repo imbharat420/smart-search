@@ -118,11 +118,11 @@ export function DiscoveryRails({ trips, guides, loading }: DiscoveryRailsProps) 
 
   return (
     <div className="space-y-10 px-5 py-6 md:px-8">
-      <div className="flex justify-end">
+      {/* <div className="flex justify-end">
         <Button asChild variant="brand">
           <Link to="/inspiration">Create a trip</Link>
         </Button>
-      </div>
+      </div> */}
 
       {loading ? (
         <>

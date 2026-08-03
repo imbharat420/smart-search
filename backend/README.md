@@ -1,6 +1,6 @@
-# ShopSense API (FastAPI · RAG)
+# SmartSearch API (FastAPI · RAG)
 
-The real backend behind the ShopSense frontend's `src/mock/api.ts`. Same request/
+The real backend behind the SmartSearch frontend's `src/mock/api.ts`. Same request/
 response shapes as the mock, so swapping the frontend over is a one-file change.
 
 - **Retrieval**: embeddings over the 24-product catalog + 3 policy docs, ranked by
@@ -90,8 +90,8 @@ Health check: `curl localhost:8000/health` · provider status: `curl localhost:8
 Startup prints the resolved chain, e.g.:
 
 ```
-[shopsense] chat: Groq (llama-3.3-70b-versatile); fallback: gemini, openai
-[shopsense] embedded 24 products + policies via Google Gemini (gemini-embedding-001)
+[smartsearch] chat: Groq (llama-3.3-70b-versatile); fallback: gemini, openai
+[smartsearch] embedded 24 products + policies via Google Gemini (gemini-embedding-001)
 ```
 
 > With no key at all the server still starts: `/search` works via the lexical

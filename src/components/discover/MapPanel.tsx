@@ -1,24 +1,20 @@
-import { useState } from 'react'
+import { useEffect, useRef } from 'react'
+import mapboxgl from 'mapbox-gl'
+import 'mapbox-gl/dist/mapbox-gl.css'
 import { ExternalLink } from 'lucide-react'
 import type { Place } from '../../types'
 import { Button } from '../ui/button'
 import { cn } from '../../lib/utils'
+import { MAX_PINS } from './constants'
 
-// Mapbox takes the pin colour as a URL parameter, and a URL cannot carry a CSS
-// variable — this is the one literal colour in src/**. Keep it level with --primary.
-const PIN_HEX = 'ffb400'
+const TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined
+// A demo/placeholder token renders nothing but tile-load errors, so the static
+// fallback below is what a reader without a real token actually sees.
+const TOKEN_IS_USABLE = !!TOKEN && !TOKEN.startsWith('pk.demo')
 
-// Shown when the static tile request fails, which it does until a real token is set.
+if (TOKEN_IS_USABLE) mapboxgl.accessToken = TOKEN!
+
 const FALLBACK_MAP = 'https://images.unsplash.com/photo-1524661135-423995f22d0b?w=1200&q=80'
-
-// The static endpoint accepts 15 overlays and labels 0-99; 12 keeps the URL readable.
-export const MAX_PINS = 12
-
-interface Viewport {
-  lat: number
-  lng: number
-  zoom: number
-}
 
 interface MapPanelProps {
   places: Place[]
@@ -29,30 +25,44 @@ interface MapPanelProps {
   onSelect: (place: Place) => void
 }
 
-function viewport(places: Place[], origin: { lat: number; lng: number } | null): Viewport {
-  const lats = places.map((p) => p.lat)
-  const lngs = places.map((p) => p.lng)
-  const lat = origin?.lat ?? (Math.min(...lats) + Math.max(...lats)) / 2
-  const lng = origin?.lng ?? (Math.min(...lngs) + Math.max(...lngs)) / 2
-
-  // Each zoom level halves the visible span, and level 0 spans 360 degrees. The 0.02
-  // floor stops a single pin from zooming to street level.
-  const span = Math.max(
-    Math.max(...lats) - Math.min(...lats),
-    Math.max(...lngs) - Math.min(...lngs),
-    0.02,
-  )
-  const zoom = Math.min(14, Math.max(8, Math.floor(Math.log2(360 / span)) - 1))
-  return { lat, lng, zoom }
+function popupHtml(place: Place, index: number): string {
+  const bits = [
+    `<span style="font-weight:700">${index}. ${place.name}</span>`,
+    `<span style="display:block;opacity:0.7;text-transform:capitalize">${place.type} · ${place.distanceMiles} mi</span>`,
+  ]
+  if (place.price) bits.push(`<span style="display:block;opacity:0.7">${place.price}</span>`)
+  return `<div style="font-size:12px;line-height:1.5;font-family:inherit">${bits.join('')}</div>`
 }
 
-function staticMapUrl(places: Place[], view: Viewport): string {
-  const token = (import.meta.env.VITE_MAPBOX_TOKEN as string | undefined) ?? 'pk.demo'
-  const pins = places.map(
-    (p, i) => `pin-s-${i + 1}+${PIN_HEX}(${p.lng.toFixed(4)},${p.lat.toFixed(4)})`,
-  )
-  const overlay = pins.length > 0 ? `${pins.join(',')}/` : ''
-  return `https://api.mapbox.com/styles/v1/mapbox/streets-v12/static/${overlay}${view.lng.toFixed(4)},${view.lat.toFixed(4)},${view.zoom}/900x1280@2x?access_token=${token}`
+// Mapbox positions a Marker by writing `transform: translate(...)` onto the
+// element passed as `{ element }` — so the hover scale below is applied to an
+// inner child instead, never to the root, or it would overwrite Mapbox's own
+// positioning transform and the pin would jump to the wrong spot on hover.
+function pinElement(index: number): { root: HTMLDivElement; pin: HTMLDivElement } {
+  const root = document.createElement('div')
+  const pin = document.createElement('div')
+  pin.style.cssText = `
+    width: 1.5rem; height: 1.5rem; border-radius: 9999px;
+    background: var(--primary-strong); color: var(--primary-foreground);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; font-family: inherit;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.35); border: 2px solid var(--card);
+    cursor: pointer; transition: transform 120ms ease;
+  `
+  pin.textContent = String(index)
+  root.appendChild(pin)
+  return { root, pin }
+}
+
+function originElement(): HTMLDivElement {
+  const el = document.createElement('div')
+  el.style.cssText = `
+    width: 1.1rem; height: 1.1rem; border-radius: 9999px;
+    background: var(--periwinkle-ink); border: 3px solid var(--card);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--periwinkle-ink) 25%, transparent),
+      0 1px 4px rgba(0,0,0,0.35);
+  `
+  return el
 }
 
 export function MapPanel({
@@ -63,43 +73,184 @@ export function MapPanel({
   onHover,
   onSelect,
 }: MapPanelProps) {
-  const [tilesFailed, setTilesFailed] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const mapRef = useRef<mapboxgl.Map | null>(null)
+  const markersRef = useRef<Map<string, mapboxgl.Marker>>(new Map())
+  const popupsRef = useRef<Map<string, mapboxgl.Popup>>(new Map())
+  const originMarkerRef = useRef<mapboxgl.Marker | null>(null)
 
   const pins = places.slice(0, MAX_PINS)
-  const view = pins.length > 0 || origin ? viewport(pins, origin) : null
-  const src = view && !tilesFailed ? staticMapUrl(pins, view) : FALLBACK_MAP
+
+  // Mount once. React StrictMode double-invokes effects in dev, so a stale
+  // instance is torn down before a second is ever created.
+  useEffect(() => {
+    if (!TOKEN_IS_USABLE || !containerRef.current) return
+
+    const map = new mapboxgl.Map({
+      container: containerRef.current,
+      style: 'mapbox://styles/mapbox/streets-v12',
+      center: [0, 20],
+      zoom: 1,
+    })
+    map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-right')
+    mapRef.current = map
+
+    return () => {
+      markersRef.current.forEach((marker) => marker.remove())
+      markersRef.current.clear()
+      popupsRef.current.clear()
+      originMarkerRef.current?.remove()
+      originMarkerRef.current = null
+      map.remove()
+      mapRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Markers: add/remove to match `pins` without rebuilding ones already on the
+  // map, so a hover-driven re-render never flickers an existing pin.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+
+    const seen = new Set(pins.map((p) => p.id))
+    for (const [id, marker] of markersRef.current) {
+      if (!seen.has(id)) {
+        marker.remove()
+        markersRef.current.delete(id)
+        popupsRef.current.delete(id)
+      }
+    }
+
+    pins.forEach((place, i) => {
+      const existing = markersRef.current.get(place.id)
+      if (existing) {
+        existing.setLngLat([place.lng, place.lat])
+        return
+      }
+      const popup = new mapboxgl.Popup({ offset: 16, closeButton: false, closeOnClick: false })
+        .setHTML(popupHtml(place, i + 1))
+      const { root } = pinElement(i + 1)
+      const marker = new mapboxgl.Marker({ element: root })
+        .setLngLat([place.lng, place.lat])
+        .setPopup(popup)
+        .addTo(map)
+
+      const el = marker.getElement()
+      el.addEventListener('mouseenter', () => {
+        onHover(place.id)
+        marker.togglePopup()
+      })
+      el.addEventListener('mouseleave', () => {
+        onHover(null)
+        if (popup.isOpen()) marker.togglePopup()
+      })
+      el.addEventListener('click', () => onSelect(place))
+
+      markersRef.current.set(place.id, marker)
+      popupsRef.current.set(place.id, popup)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pins.map((p) => `${p.id}:${p.lat}:${p.lng}`).join('|')])
+
+  // Origin marker, independent of the place pins.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    if (!origin) {
+      originMarkerRef.current?.remove()
+      originMarkerRef.current = null
+      return
+    }
+    if (originMarkerRef.current) {
+      originMarkerRef.current.setLngLat([origin.lng, origin.lat])
+    } else {
+      originMarkerRef.current = new mapboxgl.Marker({ element: originElement() })
+        .setLngLat([origin.lng, origin.lat])
+        .addTo(map)
+    }
+  }, [origin])
+
+  // Fit the view to whatever is now on the map. Keyed on the same coordinate
+  // string as the marker effect (not on hover) so panning to read a popup never
+  // gets fought by a re-fit.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    const points: [number, number][] = pins.map((p) => [p.lng, p.lat])
+    if (origin) points.push([origin.lng, origin.lat])
+
+    if (points.length === 0) return
+    if (points.length === 1) {
+      map.flyTo({ center: points[0], zoom: 12, duration: 800 })
+      return
+    }
+    const bounds = points.reduce(
+      (b, point) => b.extend(point),
+      new mapboxgl.LngLatBounds(points[0], points[0]),
+    )
+    map.fitBounds(bounds, { padding: 72, maxZoom: 14, duration: 800 })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pins.map((p) => `${p.id}:${p.lat}:${p.lng}`).join('|'), origin?.lat, origin?.lng])
+
+  // Hover driven from the place rail: lift the matching pin and show its popup.
+  useEffect(() => {
+    markersRef.current.forEach((marker, id) => {
+      // First child is the visual pin — the root element itself carries
+      // Mapbox's own positioning transform and must not be touched here.
+      const pin = marker.getElement().firstElementChild as HTMLElement | null
+      const popup = popupsRef.current.get(id)
+      if (id === hoveredId) {
+        if (pin) {
+          pin.style.transform = 'scale(1.25)'
+          pin.style.zIndex = '10'
+        }
+        if (popup && !popup.isOpen()) marker.togglePopup()
+      } else {
+        if (pin) {
+          pin.style.transform = ''
+          pin.style.zIndex = ''
+        }
+        if (popup?.isOpen()) marker.togglePopup()
+      }
+    })
+  }, [hoveredId])
+
+  const view =
+    pins.length > 0 || origin
+      ? { lat: origin?.lat ?? pins[0].lat, lng: origin?.lng ?? pins[0].lng }
+      : null
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-accent">
-      <img
-        src={src}
-        alt={
-          pins.length > 0
-            ? `Map with ${pins.length} numbered pins for the places listed`
-            : 'Map of the search area'
-        }
-        onError={() => setTilesFailed(true)}
-        className="absolute inset-0 h-full w-full object-cover"
-      />
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent to-background/20" />
-
-      <div className="absolute left-4 top-4 max-w-[15rem] rounded-2xl border bg-card/95 px-4 py-3 shadow-sm">
-        <p className="text-xs font-semibold">Static map preview</p>
-        <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-          Pins are built from the coordinates of the places listed. A pannable map is a production
-          integration; set VITE_MAPBOX_TOKEN to render the real tiles.
-        </p>
-      </div>
+      {TOKEN_IS_USABLE ? (
+        <div ref={containerRef} className="absolute inset-0 h-full w-full" />
+      ) : (
+        <>
+          <img
+            src={FALLBACK_MAP}
+            alt="Map of the search area"
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent to-background/20" />
+          <div className="absolute left-4 top-4 max-w-[15rem] rounded-2xl border bg-card/95 px-4 py-3 shadow-sm">
+            <p className="text-xs font-semibold">Map unavailable</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+              Set VITE_MAPBOX_TOKEN in .env to render the live map. Places are still listed below.
+            </p>
+          </div>
+        </>
+      )}
 
       {view && (
         <Button
           asChild
           variant="outline"
           size="sm"
-          className="absolute right-4 top-4 shadow-sm"
+          className="absolute left-4 top-4 shadow-sm"
         >
           <a
-            href={`https://www.google.com/maps/@${view.lat.toFixed(4)},${view.lng.toFixed(4)},${view.zoom}z`}
+            href={`https://www.google.com/maps/@${view.lat.toFixed(4)},${view.lng.toFixed(4)},14z`}
             target="_blank"
             rel="noreferrer"
           >
@@ -165,3 +316,7 @@ export function MapPanel({
     </div>
   )
 }
+
+// Default export only so React.lazy (Discover.tsx) can dynamic-import this
+// module without pulling mapbox-gl into the main bundle.
+export default MapPanel

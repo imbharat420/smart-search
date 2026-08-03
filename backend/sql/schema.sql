@@ -203,7 +203,7 @@ CREATE TABLE IF NOT EXISTS pois (
     category       varchar(24) NOT NULL,        -- which Discover rail this belongs to
     location       varchar(200) NOT NULL,
     rating         numeric(3, 2),
-    price_band     varchar(8),                  -- '£' .. '££££'
+    price_band     varchar(20),                 -- e.g. '££', '£38/night', 'From £9'
     lat            numeric(9, 6) NOT NULL,
     lng            numeric(9, 6) NOT NULL,
     image_url      text NOT NULL,

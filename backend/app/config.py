@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     # Unset -> the whole app runs against the in-memory seed catalogue and
     # /health reports db="memory". That fallback is deliberate (BUILD-CONTRACT
     # section 5), not a shortcut: no Postgres should be needed to demo the POC.
-    database_url: str = ""  # postgresql+asyncpg://user:pass@host:5432/traveliq
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5433/smartsearch"  # postgresql+asyncpg://user:pass@host:5432/traveliq
     db_echo: bool = False  # log every statement — noisy, useful when a query misbehaves
     db_pool_size: int = 5
 

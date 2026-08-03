@@ -4,12 +4,12 @@ import { toast } from 'sonner'
 import { cn } from '../../lib/utils'
 
 export const NAV_ITEMS = [
-  { to: '/', icon: Home, label: 'Home' },
+  // { to: '/', icon: Home, label: 'Home' },
   { to: '/search', icon: Search, label: 'Search' },
   { to: '/inspiration', icon: Sparkles, label: 'Inspiration' },
   { to: '/discover', icon: Compass, label: 'Discover' },
   { to: '/assistant', icon: MessagesSquare, label: 'Assistant' },
-  { to: '/admin', icon: SlidersHorizontal, label: 'Admin' },
+  // { to: '/admin', icon: SlidersHorizontal, label: 'Admin' },
 ]
 
 export function isNavActive(pathname: string, to: string): boolean {

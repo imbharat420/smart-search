@@ -600,7 +600,7 @@ async def _run(reset: bool, dry_run: bool) -> int:
             "DATABASE_URL is not set, so there is nothing to seed.\n"
             "  Start one:  docker compose -f backend/docker-compose.yml up -d\n"
             "  Then put the DSN in backend/.env, for example:\n"
-            "    DATABASE_URL=postgresql+asyncpg://traveliq:traveliq@localhost:5432/traveliq\n"
+            "    DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/smartsearch\n"
             "  The API does not need it: with no DSN it serves the in-memory seed catalogue."
         )
         return 2

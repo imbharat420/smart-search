@@ -183,12 +183,12 @@ enough that white on it measures only 3.1:1. All three stay unreferenced today, 
 reads calmer in a dense table than a row of solid colour chips; the numbers are in §7 so that a
 future solid state chip is a choice rather than a mistake.
 
-**One hardcoded colour survives.** `src/components/discover/MapPanel.tsx` sets `PIN_HEX = 'ffb400'`,
-because Mapbox takes the pin colour as a URL parameter and a URL cannot carry a CSS variable. Its
-comment says "keep it level with `--primary`" — and after the palette change it is not level with
-anything, it is the old yellow. The fix is `'c8e98a'`, or `'5c7d2a'` for a pin that holds up against
-pale street tiles. It is the only line in `src/**` that a palette change has to touch by hand, which
-is the argument for the no-hex rule rather than an exception to it.
+**The no-hex rule now holds everywhere.** `src/components/discover/MapPanel.tsx` used to set
+`PIN_HEX = 'ffb400'` because the old Static Images API took the pin colour as a URL parameter, and a
+URL cannot carry a CSS variable. Now that the map is a real Mapbox GL instance, pins are DOM elements
+(`mapboxgl.Marker({ element })`) styled the same way as everything else — `var(--primary-strong)`
+(`--lime-ink`) for place pins, `var(--periwinkle-ink)` for the device-location marker — so a palette
+change reaches the map for free, with no line left that a palette change has to touch by hand.
 
 ### 2.7 Radii
 

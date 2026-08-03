@@ -80,12 +80,12 @@ export function TripGallery({ title, images }: TripGalleryProps) {
       </div>
 
       <Sheet open={open} onClose={() => setOpenAt(null)} side="bottom" title="Gallery">
-        <div className="flex flex-col gap-4 p-5">
-          <div className="relative overflow-hidden rounded-2xl bg-accent">
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-5">
+          <div className="relative flex max-h-[55vh] items-center justify-center overflow-hidden rounded-2xl bg-accent">
             <img
               src={large(shots[current])}
               alt={`${title}, photo ${current + 1}`}
-              className="aspect-[16/10] w-full object-cover"
+              className="max-h-[55vh] w-full object-contain"
             />
             <button
               type="button"

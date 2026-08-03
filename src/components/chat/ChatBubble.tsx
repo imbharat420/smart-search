@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import type { Citation, ParsedQuery, UiMessage } from '../../types'
+import type { Coords } from '../../lib/geo'
 import { CitationPills } from './CitationPills'
+import { InlinePlaceCard } from './InlinePlaceCard'
 import { InlineTripCard } from './InlineTripCard'
 import { ParsedSummary } from './ParsedSummary'
+import { ShareLocationPrompt } from './ShareLocationPrompt'
 
 // UiMessage plus the three things only the assistant screen tracks: the question this reply
 // answers, what the query parser pulled out of it, and how many trips those filters match.
@@ -15,7 +18,13 @@ export interface ThreadMessage extends UiMessage {
 
 const FLASH_MS = 1200
 
-export function ChatBubble({ message }: { message: ThreadMessage }) {
+interface ChatBubbleProps {
+  message: ThreadMessage
+  // Only needed when message.needsLocation is set — see Assistant.tsx.
+  onShareLocation?: (origin: Coords) => void
+}
+
+export function ChatBubble({ message, onShareLocation }: ChatBubbleProps) {
   const cards = useRef(new Map<string, HTMLAnchorElement>())
   const flashTimer = useRef<number | undefined>(undefined)
   const [flashing, setFlashing] = useState<string | null>(null)
@@ -104,6 +113,18 @@ export function ChatBubble({ message }: { message: ThreadMessage }) {
               />
             ))}
           </div>
+        )}
+
+        {message.places && message.places.length > 0 && (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {message.places.map((place) => (
+              <InlinePlaceCard key={place.id} place={place} />
+            ))}
+          </div>
+        )}
+
+        {message.needsLocation && onShareLocation && (
+          <ShareLocationPrompt onShare={onShareLocation} />
         )}
 
         {message.parsed && (

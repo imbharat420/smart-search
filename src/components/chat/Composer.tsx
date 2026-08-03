@@ -1,21 +1,20 @@
 import { useEffect, useRef } from 'react'
 import { ArrowUp, Loader2, MapPin, Mic } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
 interface ComposerProps {
   value: string
   onChange: (value: string) => void
   onSend: () => void
+  onNearMe: () => void
   busy: boolean
 }
 
 const ICON_BUTTON =
   'flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground'
 
-export function Composer({ value, onChange, onSend, busy }: ComposerProps) {
+export function Composer({ value, onChange, onSend, onNearMe, busy }: ComposerProps) {
   const field = useRef<HTMLTextAreaElement>(null)
-  const navigate = useNavigate()
 
   // Grows with the text up to about four lines, then scrolls inside the pill.
   useEffect(() => {
@@ -66,8 +65,9 @@ export function Composer({ value, onChange, onSend, busy }: ComposerProps) {
       <button
         type="button"
         title="Find places near me"
-        aria-label="Find places near me on Discover"
-        onClick={() => navigate('/discover')}
+        aria-label="Find places near me"
+        onClick={onNearMe}
+        disabled={busy}
         className={ICON_BUTTON}
       >
         <MapPin className="h-4 w-4" />

@@ -66,14 +66,14 @@ export function Admin() {
           <h1 className="mt-3 text-3xl font-extrabold tracking-tight md:text-4xl">
             Change how search behaves without a release
           </h1>
-          <p className="mt-4 text-[15px] text-muted-foreground">
+          {/* <p className="mt-4 text-[15px] text-muted-foreground">
             Everything a merchandiser would normally raise a ticket for lives here: which fields are
             searched and how heavily, which trips lead a campaign, the words travellers use that the
             catalogue does not, where each field&apos;s truth comes from, and what people searched
             for and did not find. Edits go through the same API the storefront reads, so they take
             effect on the next search.
-          </p>
-          <p className="mt-4 flex items-start gap-2 rounded-2xl border bg-accent px-4 py-3 text-sm">
+          </p> */}
+          {/* <p className="mt-4 flex items-start gap-2 rounded-2xl border bg-accent px-4 py-3 text-sm">
             <Lock aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
             <span>
               Authentication and roles are out of scope for this POC — the route is open and no login
@@ -83,7 +83,7 @@ export function Admin() {
           <p className="mt-2 text-xs text-muted-foreground">
             With the FastAPI service stopped, the typed client answers from the seeded fixtures in
             src/mock/admin.ts and edits live only until you reload.
-          </p>
+          </p> */}
         </header>
 
         <div className="sticky top-0 z-20 -mx-6 mt-8 bg-panel px-6 md:-mx-10 md:px-10">

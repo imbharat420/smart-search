@@ -1,7 +1,7 @@
 [project]
-name = "shopsense-api"
+name = "smartsearch-api"
 version = "0.1.0"
-description = "ShopSense — FastAPI RAG backend for the semantic product search + chat frontend"
+description = "SmartSearch — FastAPI RAG backend for the semantic product search + chat frontend"
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "fastapi>=0.115",
