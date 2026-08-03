@@ -176,11 +176,17 @@ function offlineAnswer(trips: Trip[]): string {
   if (rest.length > 0) {
     text += ` Also worth a look: ${rest.map((t) => `${t.title} (${money(t.priceFrom)})`).join(' and ')}.`
   }
-  return `${text} Start the FastAPI backend for live retrieval, policy citations and streamed reasoning.`
+  return `${text} Start the FastAPI backend for live retrieval, policy citations, streamed reasoning and the guided trip plan.`
 }
 
 // Canned stream used when /chat cannot be opened. It is grounded in the same
 // local catalogue the search fallback uses, so the demo stays coherent.
+//
+// It deliberately emits no `state` or `quickReplies`: the six-slot plan lives in
+// backend/app/plan.py, and reimplementing its merge and loop-break rules here would
+// put the conversation's behaviour in two places that could disagree. Offline the
+// assistant answers without chips and `offlineAnswer` says so, which is the same
+// honest-degradation line the rest of this module takes.
 async function* offlineChat(messages: ChatMessage[]): AsyncGenerator<ChatChunk> {
   const question = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
   const parsed = localParse(question)
@@ -207,7 +213,20 @@ async function* offlineChat(messages: ChatMessage[]): AsyncGenerator<ChatChunk> 
   yield { done: true }
 }
 
-async function openChatStream(messages: ChatMessage[]): Promise<Response | null> {
+/** Everything a chat turn carries beyond the transcript itself. */
+export interface ChatTurnOptions {
+  // Keys the backend's plan state (see src/lib/sessionStore.ts). Omitted means the
+  // turn still answers, it just starts from an empty plan.
+  sessionId?: string
+  // Set only when the traveller tapped a quick-reply chip. Passed through verbatim —
+  // the patch is the backend's own vocabulary and this client never reads into it.
+  slotPatch?: Record<string, unknown>
+}
+
+async function openChatStream(
+  messages: ChatMessage[],
+  opts: ChatTurnOptions,
+): Promise<Response | null> {
   const controller = new AbortController()
   // Only the response headers are on a clock; the stream itself may run for a while.
   const timer = window.setTimeout(() => controller.abort(), TIMEOUT_MS)
@@ -215,7 +234,11 @@ async function openChatStream(messages: ChatMessage[]): Promise<Response | null>
     const res = await fetch(`${BASE_URL}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({
+        messages,
+        sessionId: opts.sessionId,
+        slotPatch: opts.slotPatch,
+      }),
       signal: controller.signal,
     })
     return res.ok ? res : null
@@ -292,8 +315,8 @@ export const api = {
     )
   },
 
-  async *chat(messages: ChatMessage[]): AsyncGenerator<ChatChunk> {
-    const res = await openChatStream(messages)
+  async *chat(messages: ChatMessage[], opts: ChatTurnOptions = {}): AsyncGenerator<ChatChunk> {
+    const res = await openChatStream(messages, opts)
     const body = res?.body
     if (!body) {
       fellBack = true

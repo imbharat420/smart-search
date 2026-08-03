@@ -4,3 +4,7 @@ pydantic>=2.9
 pydantic-settings>=2.6
 openai>=1.50
 numpy>=1.26
+# db.py imports SQLAlchemy unconditionally (the engine is only *created* when
+# DATABASE_URL is set), so both belong here rather than in an optional extra.
+sqlalchemy>=2.0
+asyncpg>=0.29

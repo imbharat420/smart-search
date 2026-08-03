@@ -561,6 +561,40 @@ class SearchEvent(Base):
     )
 
 
+# --- Conversational state --------------------------------------------------
+
+class AssistantSession(Base, TimestampMixin):
+    """One row per conversation: the traveller's plan, as JSON.
+
+    The six tracked slots (duration, budget, region, holiday type, pace, group
+    size) are one JSONB blob rather than six columns because the shape is the
+    assistant's, not the catalogue's — it moves whenever the conversational design
+    moves, and a column per slot would mean a migration every time the flow
+    changes. Nothing in SQL ever filters or joins on it either: sessions.py reads
+    the whole object back for one session id and merges it in Python, so per-slot
+    columns would buy indexing nobody would use.
+
+    turn_count is the one value lifted out, because "how long do conversations
+    run before we retrieve?" is a question worth answering without unpacking the
+    blob.
+    """
+
+    __tablename__ = "assistant_sessions"
+
+    id: Mapped[uuid.UUID] = _pk()
+    # Minted by the browser (crypto.randomUUID, held in sessionStorage) and never
+    # authenticated. Unique because every turn upserts on it — see sessions.py.
+    session_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    state: Mapped[dict[str, Any]] = mapped_column(nullable=False, server_default="{}")
+    turn_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+    __table_args__ = (
+        # sessions.py clamps the counter before writing; the constraint is what
+        # makes that a rule of the table rather than a habit of one caller.
+        CheckConstraint("turn_count >= 0", name="ck_assistant_sessions_turn_count"),
+    )
+
+
 # --- Commerce --------------------------------------------------------------
 
 class Booking(Base, TimestampMixin):

@@ -1,9 +1,14 @@
 # SmartSearch AI Travel Assistant — Master RAG Architecture & Conversational Design
 
-This is a proposal, not an as-built doc — it says so wherever it departs from the code.
-Every claim about *current* behaviour is read out of `backend/app/rag.py`, `nlq.py`,
+> **Status: built.** This began as a proposal and has since been implemented — see
+> §6 for the as-built map, what changed on contact with the code, and the two
+> pre-existing parser bugs the work uncovered. The `**NEW**` markers below now mean
+> "new relative to the pre-existing codebase", not "not yet written". Sections 1–5
+> are the design as agreed; §6 is the reconciliation.
+
+Every claim about *pre-existing* behaviour is read out of `backend/app/rag.py`, `nlq.py`,
 `chat.py`, `ingest.py`, `models.py`, `schema.sql` and `src/types.ts`; every claim about
-*proposed* behaviour is marked **NEW**. Nothing here is aspirational filler — each
+*added* behaviour is marked **NEW**. Nothing here is aspirational filler — each
 proposal names the file it lands in and the existing thing it extends.
 
 **Non-negotiable constraint, stated up front:** zero new third-party packages. Every
@@ -494,3 +499,305 @@ and no new third-party dependency:
 - `backend/app/rerank.py` — one more prompt template against the existing `llm.py` client (§1.4)
 - `backend/app/events.py` — a ~20-line pub/sub bus (§1.5.2)
 - `TripPlanState` model + `assistant_sessions` table + `ChatRequest.sessionId` — the state layer (§1.5.1)
+
+
+## Top 100 ↓ MMR ↓ Top 20 ↓ LLM ↓ Top 5
+/btw Top 109 MMR Top 20 LLM Top 5 is this better approach if this is try with this approach
+Yes — that's a better pipeline than a single—stage cosine cut, and it's the standard shape for a reason. The MMR stage does something neither similarity nor the LLM reranker does: it kilts
+near—duplicates before you spend tokens on them.
+Why it helps specifically here. Looking at the catalogue vocabulary I read earlier, redundancy is a real risk. There are LI Nordic destinations tagged Northern Lights (Arctic Norway, South Iceland,
+Finnish Lapland, Swedish Lapland). A pure on "aurora trip for a family" wilt very plausibly return 8 near—identical Lapland trips, and the LLM reranker then burns its context judging
+between trips that differ only by supplier. MMR spends part of the budget on diversity, so the 20 that reach the reranker span Norway and Iceland and Finland — which is also just a better answer
+surface, since the cards below the reply shouldn 't be four versions of the same week.
+One important caveat on the top—IOO stage. MMR's diversity term needs pairwise similarity between candidates, and the code has that essentially free — rag. py keeps the whole index as one
+unit—normalised numpy matrix, so V @ V.T over 100 rows is a dot product, microseconds. But it only works on the semantic path. When _query_vec() returns None (no embedding key, or a width
+mismatch, or a provider blip) the fallback is _ lexical_score, and there are no vectors at all to diversify against. So MMR has to be conditional on mode
+"semantic" degrading to a plain lexical
+top—N — same discipline as everything else in that file.
+Where I'd put it, and what I'd change from your sketch. Two adjustments:
+— Not top—IOO by raw cosine. rag.py applies hard constraints (_constraints) after scoring, deliberately — so facet counts cover the same set the results do. If you take top—IOO by similarity first, you
+can hand MMR 100 trips of which 90 fail the budget or month filter, and the diversity pass optimises over trips that will be thrown away. Constrain first, then take top—IOO of what survives. On a
+24—trip seed catalogue this is academic; at 10k trips it's the difference between the stage working and being noise.
+— around 0.7, not 0.5. Travel intent is narrow. Someone asking for the northern lights wants variety within aurora trips, not a beach trip smuggled in for diversity's sake. The usual 0.5 is tuned for
+open—domain document retrieval; weight relevance higher here.
+The one thing MMR won't fix. It's a redundancy fitter, not a relevance judge — it can only diversify what the first stage retrieved. Scenario D in the doc ("quiet, secluded nightlife in a busy city
+centre") fails at the embedding stage, before MMR ever sees the candidates: the blended vector lands somewhere generically central and the right trips were never in the top—IOO. That's why the graph
+traversal stage exists. MMR and graph traversal are solving different failures — MMR trims a good candidate set, graph traversal builds one when the embedding averages away a relational constraint.
+Worth adding MMR, but as a fourth stage alongside the three in the doc, not a substitute for the graph one.
+Net: constrain top—IOO MMR(XæO.7) top—20 LLM rerank top—5 is the right pipeline, and it's --15 tines of numpy in rag. py with no new dependency.
+
+##  User ↓ Intent Classifier ↓ Planner ↓ Retriever
+
+Mostly yes — but it depends on which of two things you mean by "Planner, " and one of them is a real risk in this codebase.
+The classifier stage is the strongest part of the idea. It's the one thing missing from the doc's pipeline. Right now chat.py treats every turn identically: parse retrieve trips * retrieve one policy
+answer. But the traffic isn't uniform. From what I read in the code and seed data, there are at I-east four distinct intents already flowing through that one path:
+— Trip search — the main case, needs full- retrieval + rerank.
+— Policy questions ("how much deposit?" , "am I ATOL protected?" ) — these need POLICIES, and the trip retrieval is pure waste. rag.py's retrieve_for_chat currently always runs a futt trip search even
+for these, then also picks a policy.
+— Stot answers ("Mid Elk—E3k" ,
+"about IO days") — these are chip taps or one—word replies. They need a state merge and possibly no new retrieval at att if nothing material changed.
+— Near—me place lookups — already special—cased, but on the frontend (parseNearMe in Assistant.tsx bypasses the LLM entirety).
+That last one is the tell: the codebase already discovered it needs intent routing and solved it ad—hoc in the browser. A proper classifier is that instinct done once, server—side,
+instead of
+scattered .
+So the classifier earns its place. Cheap, too — it can be heuristic—first with an LLM fallback, exactly the two—layer pattern ntq.py already uses.
+The Planner is where I'd push back. If you mean a deterministic router — "policy intent * skip trip retrieval; slot answer merge state, re—retrieve only if a constraint moved;
+pipeline" — that's genuinely good, and it's mostly plain Python, not a model call.
+If you mean an LLM planning step that decides which toots to call in what order, I'd skip it. Reasons specific to this system:
+trip search * futt
+— The toot set is smalt and the routing is knowable. Six or seven tools with obvious triggers. An LLM planner adds a full- round trip per turn to decide something a lookup table decides correctly.
+— Latency compounds badly here. The doc's pipeline already adds one LLM catt for reranking on top of the existing ntq.parse() catt and the generation call. That's three. A planner makes four sequential
+model calls before the first token reaches the browser — and chat.py's whole streaming contract is built around getting cards and prose to the user fast (parsed trips tokens, deliberately in that
+order). Four serial calls undermines the thing the streaming design was protecting .
+— It's a new failure mode with no cheap fallback. Every other stage in this codebase degrades gracefully: no embedding key lexical; LLM parse fails heuristic regex; provider 429s next provider. A
+planner that returns a malformed plan has no deterministic equivalent to fatt back to, because the fallback is "just run the normal pipeline" — at which point you didn't need the planner.
+Where your stage sits relative to what's in the doc. Your
+User Intent Classifier State merge [route]
+policy
+slot answer
+trip search
+sketch stops at Retriever, so it's orthogonal to the MMR/rerank discussion rather than competing with it. Composed, the honest shape is:
+policy retrieval only
+* merge, maybe skip retrieval
+constrain top—IOO MMR top—20 rerank top—5
+generation
+
+
+## Retriever ↓ Confidence ↓ Threshold
+Yes — worth adding, and it fits this codebase unusually welt because most of the signal already exists.
+You already have most of a confidence score. Three signals are sitting there unused as a gate:
+— ParsedQuery. confidence (0—0.97) — how much of the sentence the parser actually understood.
+Two things to be careful about,
+though.
+mode — "semantic" vs "texicat". A lexical answer is inherently tower—confidence; the README already treats that distinction as something to surface rather than hide.
+— The retrieval scores themselves, plus _Agreement.reasons / . possible — how many stated requirements the top trip actually satisfies, which is a much better confidence proxy than raw cosine.
+That last one matters most. A cosine score of 0.9 on a query the parser barely understood is not a confident answer; three of three stated constraints met is, even at a mediocre similarity. So compute
+confidence from agreement—coverage first, similarity second, and treat mode
+"lexical" and tow parse confidence as multiplicative penalties.
+If you add the LLM reranker, its per—candidate score is a fourth signal — and a genuinely independent one, since it's the only stage that attended to query and candidate jointly. A high rerank score on
+the top result is strong evidence; a flat distribution across all 29 ("everything is 0.6") is the reranker telling you it couldn't discriminate, which is itself a confidence signal worth reading.
+The design risk: what the threshold does. The obvious move is "below threshold ask a clarifying question. I' Resist that, because it collides head—on with two rules already established in the design:
+— The loop—break rule (skipCounts 3 stop asking, commit to best signal). A confidence gate that asks for clarification is a second, independent source of questions — and the two can fight. A
+traveller who skipped the region three times, then gets a tow—confidence retrieval, must not be asked about the region again because a different subsystem decided it was uncertain. The gate has to
+check plan. exhausted() before it's allowed to ask anything.
+— Scenario E ("I just want to go somewhere nice") is definitionally tow confidence and the specified behaviour is explicitly not to ask — it's to show popular trips and say so. So tow confidence is
+sometimes the correct terminal state, not a trigger.
+So the threshold should mostly change how the answer is framed, not whether one is given:
+— High answer normally, assert the match.
+— Medium answer, but hedge honestly and offer one concrete widening ("these are the closest, though nothing hits your November date exactly — want me to took either side of it? I'). rag. py already has
+relaxations() and suggestionsO which produce exactly this copy, currently only used on the zero—result path. A medium—confidence answer is the natural second consumer.
+— Low * stilt show trips, but lead with the uncertainty and offer chips — only for slots not already exhausted.
+Two smatter cautions. Don't let the confidence number reach the model as a number it can talk about — it'll say "I'm 62% confident, " which is both meaningless to a traveller and unearned precision.
+Pass it as a framing instruction instead. And surface it in the response the way mode and parsed. source already are, so the frontend can show it honestly rather than the backend silently deciding tone
+— that's consistent with how ParsedSummary.tsx already displays "Parsed by AI" vs "Keyword fallback" instead of hiding the fallback.
+Net: add it, derive it from agreement—coverage rather than similarity atone, and make it modulate tone and offered next steps rather than gating the answer — with an explicit check against the
+loop—break state before it's permitted to ask anything.
+---
+
+## Section 6 — As built: the reconciliation
+
+Sections 1–5 are the design as agreed. This section is what actually shipped, where it
+diverged, and what the work uncovered. It exists because a design doc that is silently
+out of date is worse than no design doc.
+
+### 6.1 What landed, file by file
+
+| File | Status | Notes |
+| --- | --- | --- |
+| `backend/app/events.py` | **new** | Synchronous in-process bus, ~90 lines, stdlib only. Handlers only ever *drop* caches — never rebuild, because rebuilding needs an `await` and the bus is sync. |
+| `backend/app/plan.py` | **new** | The six slots as pure functions, zero IO. Also `{"clear": slot}` and `changed_slots()`, neither of which was in the original design (§6.2). |
+| `backend/app/graph.py` | **new** | In-memory adjacency. 94 nodes / 273 edges over the 33-trip seed catalogue. |
+| `backend/app/rerank.py` | **new** | LLM-as-cross-encoder over a ≤30 shortlist. Returns `(ranked, reranked)` so the caller can report an honest mode rather than implying a rerank that timed out. |
+| `backend/app/sessions.py` | **new** | Postgres + bounded-memory stores behind one Protocol, chosen at startup, mirroring `repository.py`. |
+| `backend/app/chat.py` | rewritten | The orchestration: state merge → parse → candidates (+graph narrowing, +widening) → rerank → context → stream → save. |
+| `backend/app/schemas.py` | additive | `TripPlanState`, `QuickReply`, `QuickReplyGroup`; `ChatChunk.state`/`.quickReplies`; `ChatRequest.sessionId`/`.slotPatch`; four `Health` fields. |
+| `backend/app/models.py`, `sql/schema.sql` | additive | `assistant_sessions`, one JSONB blob per conversation, plus the `updated_at` trigger. |
+| `backend/app/main.py` | additive | Graph build, `init_store()`, `_wire_invalidation()`, richer startup banner and `/health`. |
+| `backend/app/rag.py` | additive | `invalidate()`, `retrieve_policy()` (split out of `retrieve_for_chat`), `policy_by_keyword()` (was private). |
+| `backend/app/nlq.py` | additive + **2 bug fixes** | `cache_clear()`, plus the two parser fixes in §6.3. |
+| `backend/app/routers/{chat,admin,ingest}.py` | additive | Session/patch passthrough; promotions and synonyms now reach chat retrieval; invalidation events published on the success path. |
+| `src/types.ts`, `src/lib/api.ts` | additive | The mirrored contract; `api.chat(messages, { sessionId, slotPatch })`. |
+| `src/lib/sessionStore.ts`, `components/chat/QuickReplies.tsx`, `components/chat/PlanSummary.tsx` | **new** | The chip and plan surfaces. |
+| `src/pages/Assistant.tsx`, `components/chat/ChatBubble.tsx` | additive | Wiring: session id, chunk handling, chip taps, slot clearing. |
+
+Dependency count added, backend and frontend: **zero**, as §0 required.
+
+### 6.2 Where the design changed on contact with the code
+
+1. **Slot extraction is not an LLM tool call.** §1.5.1 described `update_trip_state` as a
+   function the model calls. It isn't: `nlq.py` already extracts five of the six slots, so
+   `plan.patch_from_parsed` is a *deterministic projection* of the `ParsedQuery` the turn
+   already paid for, plus one keyword table for `pace`. This removes a whole LLM round trip
+   per turn and makes the entire slot-filling flow testable without a provider. The tool
+   surface in §1.6 is still the right conceptual model; it is just implemented as pure code
+   rather than as function-calling.
+2. **`{"clear": <slot>}` was added.** The design had no way to *remove* an answer — a patch
+   cannot clear a slot by sending `None`, since an absent key must never wipe a known value.
+   The chip X in `PlanSummary` needed a real backend counterpart, so clearing is its own
+   sentinel and resets that slot's counters (clearing is a request to answer again).
+3. **`region` never enters `ParsedQuery.destination`.** A region is a *set* of countries and
+   `destination` is a single string, so writing "Europe" there gives `rag.py` a needle that
+   matches no trip and silently empties the results. Region narrowing therefore happens in
+   `chat.py` via `graph.trips_in_countries()`, and `plan.to_parsed` documents the trap.
+4. **`SHARES_REGION` falls back to country.** The seed catalogue holds exactly one
+   destination per `destinations.region` value ('Campania', 'Tuscany'), so a strict
+   region-sibling index is empty and the "near X but different" hop returns nothing. Edges
+   fall back to the country's other destinations under the same edge kind, with a label that
+   says which relationship was used ('also in Italy', not 'also in Campania').
+5. **Zero-result widening was not in the design and turned out to be essential.** `rag.py`'s
+   constraints are conjunctive, so Scenario A's own example sentence — family of four, beach,
+   Italy, ten days, £2,500 — describes a trip the catalogue does not sell and returned
+   **nothing**. `/search` answers that with `suggestions()` and lets the traveller click; a
+   conversation cannot. `chat.py` now drops the constraint costing the most results (up to
+   two), and passes the dropped labels into the prompt so the reply says which requirement it
+   stretched. This is what gives "never say impossible" a retrieval mechanism instead of only
+   a tone of voice.
+6. **The retrieval query is not always what the traveller "said".** A tapped chip puts its own
+   label in the transcript — "Surprise me!", "Skip — any length". Handing that to `rag.py` is
+   actively harmful: with no constraints to fall back on, the relevance floor gates the entire
+   catalogue and tapping a chip returned zero trips. Chip turns retrieve on the plan summary
+   instead, and on the empty query when the plan is empty too — which `rag.py` already reads
+   as browsing and ranks by rating and promotions. That is also what makes Scenario E work.
+7. **The policy-turn test is the keyword hit, not the parse.** The first version asked whether
+   the parser had read anything trip-shaped out of the sentence. It failed in practice: the AI
+   layer returns a theme and a confidence for "what is your cancellation policy?" often enough
+   that the suppression never fired, and the assistant asked about holiday type in the middle
+   of a booking-conditions answer. The words in the sentence do not have that problem.
+
+### 6.3 Two pre-existing parser bugs this work uncovered
+
+Both are in `nlq.py`, both predate this change, and both were found by testing the plan
+against the doc's own Scenario A sentence. Both are the same failure mode — a regex whose
+digit run backtracks to match *half* a number.
+
+- **`£2,500pp` parsed as £2.** `_PRICE_RE`/`_BUDGET_RE` ended `(k)?\b`. Given "about
+  £2,500pp" the greedy digit run backtracks looking for a word boundary, finds the one
+  between `2` and `,`, and the budget parses as **£2** — which then filters the entire
+  catalogue away. `£2500pp` matched nothing at all, since there is no boundary between a
+  digit and `pp`. Fixed with a shared `_AMOUNT` fragment ending `(?![\d.,])`.
+- **`for 10 days` parsed as a group of 1.** `_GROUP_RE`'s second alternative is
+  `(?:for|with)\s+(\d{1,2})(?!\s*(?:day|night|...))`. On "10 days for a family of 4" the run
+  grabs `10`, the day-lookahead rejects it, the engine backtracks to `1`, and the lookahead
+  now sees `0 days` instead of ` days` — so it accepts. A sentence saying four travellers
+  retrieved for one. Fixed by adding `(?!\d)` to all three alternatives.
+
+Both fixes are covered by the probe suite in §6.4, including regression cases the old
+regexes got right (`£2.5k`, `£15,000`, `group of 12`, `for 3 weeks`, `14 nights` → 15 days).
+
+### 6.4 How it was verified
+
+No Python toolchain was available in the working environment, so verification used an
+isolated venv outside the repo. Nothing was installed into the project.
+
+- **Static cross-reference** — an AST pass over all 21 modules asserting every
+  `module.attr` resolves to a real top-level name. Catches the contract drift that is the
+  main risk when several modules are written in parallel.
+- **Unit behaviour** — the plan rules against the real seed catalogue: patch/merge
+  semantics, later-answer-wins, absent-key-never-wipes, the skip/reversal/ask ceilings,
+  the clear sentinel, band↔figure consistency, region bucketing, `to_parsed` folding, graph
+  build and traversal, and a bad event subscriber not breaking the publisher.
+- **Scenarios A–E end to end** through `chat.stream_chat`, asserting chunk order, the
+  widening path, chip-tap retrieval, the loop-break terminating, policy turns suppressing
+  the plan question while a mixed turn keeps it, and plan persistence across turns.
+- **HTTP** — `fastapi.testclient.TestClient` (so the real lifespan runs): `/health`,
+  `/chat` as SSE with and without `sessionId`/`slotPatch`, an old-shaped request body,
+  `/search`, `/destinations`, `/guides`, and an admin write dropping the parse cache
+  through the event bus.
+- **Fuzzing** — malformed `slotPatch` bodies (`{"__proto__":1}`, `{"region":"Atlantis"}`,
+  `{"durationDays":"ten"}`, `{"skip":"nope"}`, `{"maxPrice":-1}`) must never 500 the endpoint.
+- **Frontend** — `npx tsc --noEmit` clean.
+
+### 6.5 Known limitations, stated rather than hidden
+
+- **The embedding index is invalidated, not rebuilt.** `index.invalidate()` clears the
+  version marker so the *next* `build()` re-embeds; nothing awaits that build mid-process, so
+  an edited trip keeps its old vector until restart or the next explicit build. The bus is
+  synchronous by design and re-embedding needs an `await` — doing it properly means a
+  background task, which is a bigger change than this one.
+- **`pace` has no catalogue column.** It is a soft rerank signal only. A wrong read costs a
+  little ordering, never a dropped trip — which is why `pace_from_text` is allowed to be a
+  keyword table and why negation ("not too packed") reads wrong.
+- **`SESSION_SLOT_CHANGED` has no subscriber.** It fires at the moment the change is known so
+  a future per-session candidate cache has something to hang off. It also does not fire on a
+  price refinement inside one band (£2,400 → £2,500), because `changed_slots` compares budget
+  as its band.
+- **Offline mode has no chips.** `src/lib/api.ts`'s canned fallback emits no `state` or
+  `quickReplies`: re-implementing `plan.py`'s merge and loop-break rules in TypeScript would
+  put the conversation's behaviour in two places that could disagree.
+- **The rerank prompt is not few-shot.** One instruction plus a numbered candidate list. If
+  ordering quality proves weak in practice, worked examples are the first thing to add — and
+  `nlq.py`'s AI layer is the pattern to copy.
+
+---
+
+## Section 7 — Observability: LangSmith tracing + pipeline metrics
+
+Added after §6 shipped. The §1.2 pipeline existed but was a black box between the
+request log and the answer: a wrong reply could be a bad parse, a bad retrieval, a
+rerank that timed out, or a provider that hallucinated, and telling those apart
+meant re-running the turn with a debugger. This section makes the orchestration
+observable — without violating §0's zero-new-dependency rule.
+
+### 7.1 Per-turn tracing (LangSmith, `backend/app/tracing.py`, NEW)
+
+One trace per chat turn: a root `chat_turn` run whose children are the pipeline
+stages, named identically to the §1.2 diagram so the trace *is* the diagram with
+real values in it:
+
+| Span | run_type | Inputs | Outputs |
+| --- | --- | --- | --- |
+| `chat_turn` (root) | chain | question, slotPatch | full reply, grounded trip titles; sessionId in metadata |
+| `nlq.parse` | parser | the traveller's sentence | the request line; parse `source` + `confidence` in metadata |
+| `plan.merge` | chain | slotPatch | plan summary line, which slots the turn moved |
+| `retrieve` | retriever | retrieval query, plan line | candidate titles, `mode` (semantic/lexical), widened constraints |
+| `policy.retrieve` | retriever | the sentence | which policy document matched, or none |
+| `rerank` | llm | query, plan, shortlist size | whether the rerank served, the order with scores and reasons |
+| `llm.generate` | llm | the full OpenAI-wire messages (system + CONTEXT + window) | the complete reply; provider + model in metadata |
+
+The degradation contract matches every other capability in this doc: no
+`LANGSMITH_API_KEY` and the spans are still built (they double as the stage
+timers for §7.2) but nothing is uploaded; the upload is a fire-and-forget task
+after the response so tracing adds zero latency to a turn; a failed upload warns
+once and then goes quiet; a full upload backlog drops the trace, never the turn.
+A client that disconnects mid-stream still produces a trace, with the in-flight
+stage marked — a spike of those is a latency problem wearing a different hat.
+
+**Why not `pip install langsmith`:** the SDK is a convenience wrapper over the
+same `/runs/batch` REST ingest endpoint, and httpx — the SDK's own transport —
+already ships here as the openai package's transport. What the SDK would add
+(background batching, retries, compression) becomes worth it if trace volume
+outgrows one POST per turn; that swap changes `tracing.py`'s internals and
+nothing that `chat.py` codes against.
+
+**Why not LangChain/LangGraph for the orchestration itself:** the §1.2 pipeline
+is ~100 lines of explicit, deterministic Python with a documented fallback at
+every stage. Porting it onto a framework would re-express the same graph in
+someone else's vocabulary, add the project's first heavyweight dependency, and
+make the fallback behaviour — the most carefully designed part — someone else's
+default. Tracing is where the LangSmith ecosystem genuinely helps, so that is
+the part that was adopted; the orchestration stays owned.
+
+### 7.2 In-process metrics (`backend/app/metrics.py`, NEW)
+
+Counters and per-stage latency distributions (count/errors/avg/p50/p95/max over a
+256-observation ring), recorded under the same stage names the traces use, so the
+p95 on a dashboard and a slow run opened in LangSmith describe the same stage by
+the same name. Counters worth watching: `chat_turns`, `widened_turns`,
+`zero_result_turns`, `rerank_served` vs `rerank_fallback`, `served_by.<provider>`,
+`provider_chain_exhausted`, `chat_client_disconnects`.
+
+Two read surfaces, no new package for either:
+
+- `GET /admin/observability` — JSON: LangSmith status + counters + stage table.
+- `GET /metrics` — the same numbers hand-rendered in Prometheus text exposition
+  format, scrapeable by Prometheus/Grafana with no adapter.
+
+`/health` gains `tracing` and `tracingProject`, keeping the rule that an operator
+can tell "switched off" from "silently broken" without reading logs.
+
+### 7.3 What this uncovered
+
+`backend/requirements.txt` was missing `sqlalchemy` and `asyncpg` even though
+`db.py` imports SQLAlchemy unconditionally — a clean `pip install -r
+requirements.txt` produced a backend that could not boot. Pre-existing, found by
+the §7 smoke test running against a fresh venv; both are now pinned there.

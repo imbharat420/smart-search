@@ -9,6 +9,13 @@ response shapes as the mock, so swapping the frontend over is a one-file change.
 - **Chat**: retrieves relevant products + a policy, feeds them as grounded context
   to the model, and **streams** the reply token-by-token over SSE, then emits
   the products and citations as separate events.
+- **A plan, not a transcript**: the assistant tracks six parameters across the
+  conversation — duration, budget, region, holiday type, pace, group size — as one
+  explicit JSON object rather than re-reading them out of scrollback each turn. It
+  asks at most one question per turn, always with tappable options and always with a
+  skip, and stops asking once a slot has been skipped or reversed enough times.
+  See [Assistant](#assistant-the-six-slot-plan) below and
+  [docs/assistant-rag-architecture.md](../docs/assistant-rag-architecture.md).
 - **Any of six providers, with fallback**: five have free tiers. A 429 or outage on
   one is retried on the next, so free-tier limits don't surface to the user.
 
@@ -55,14 +62,98 @@ retrieved product cards.
 > embedding family also has its own similarity range, so the relevance
 > calibration ships per provider (`EMBED_SIM_*` to override).
 
+## Assistant: the six-slot plan
+
+`POST /chat` is a planning conversation, not a stateless question-and-answer. Per turn:
+
+```
+state.load ─ parse ─ candidates ─ rerank ─ context ─ stream ─ state.save
+              │         │           │
+              │         │           └─ rerank.py: the chat model scores a ≤30 shortlist,
+              │         │              attending to query and candidate together. Falls
+              │         │              back to the retrieval order on any failure.
+              │         └─ rag.py, narrowed by graph.py when the plan names a region,
+              │            then widened if the constraints matched nothing (below).
+              └─ nlq.py, unchanged — it already reads five of the six slots
+```
+
+- **State** lives in `plan.py` (the rules — pure, no IO) and `sessions.py` (the storage —
+  Postgres, or in-process when `DATABASE_URL` is unset). The browser mints a `sessionId`
+  and sends it with each turn; without one the turn still answers, it just has no memory.
+- **Chips.** The response carries `quickReplies` for at most one slot per turn. Tapping one
+  sends the chip's `patch` back verbatim, so a tap never depends on the parser re-reading
+  its own label. Every question carries a skip, and a skip is a complete answer.
+- **Loop-breaking is a threshold, not a judgement.** Three skips or reversals on a slot, or
+  two askings of it, and the assistant stops asking and commits to what it has.
+- **Widening.** The filters are conjunctive, so a rich sentence can describe a trip the
+  catalogue does not sell. Rather than dead-ending, chat drops the constraint costing the
+  most results (up to two) and tells the model what it stretched, so the reply says so.
+- **Zero new dependencies.** The graph is an in-memory adjacency index over the existing
+  tables, not a graph database; the reranker is the chat model already in `llm.py`, not a
+  local cross-encoder. Both trade-offs, and when to revisit them, are in the design doc.
+
+`/health` reports each of these so a degraded mode is visible without reading logs:
+`sessionStore`, `graphNodes`, `graphEdges`, `rerank`.
+
+```dotenv
+RERANK_ENABLED=true            # false keeps the plain similarity order
+RERANK_TIMEOUT=12.0            # then it keeps the similarity order too
+RERANK_CANDIDATES=24           # shortlist size handed to the reranker
+ASSISTANT_HISTORY_TURNS=4      # raw dialogue turns sent alongside the plan
+```
+
 ## Contract
 
 | Endpoint | Body | Returns |
 | --- | --- | --- |
 | `POST /search` | `{ query, filters?: { category?, maxPrice?, inStockOnly? } }` | `SearchResult[]` |
-| `POST /chat` | `{ messages: { role, content }[] }` | `text/event-stream` of `ChatChunk` (`{token}` / `{products}` / `{citations}` / `{done}`) |
-| `GET /health` | — | `{ status, configured, indexed, products, chatProvider, chatModel, fallbacks, embedProvider }` |
+| `POST /chat` | `{ messages: { role, content }[], sessionId?, slotPatch? }` | `text/event-stream` of `ChatChunk` (`{parsed}` / `{state}` / `{trips}` / `{quickReplies}` / `{token}` / `{citations}` / `{done}`, in that order) |
+| `GET /health` | — | `{ status, configured, indexed, products, chatProvider, chatModel, fallbacks, embedProvider, sessionStore, graphNodes, graphEdges, rerank, tracing, tracingProject }` |
 | `GET /providers` | — | every registry entry with `configured`, resolved models, and where to get a key |
+| `GET /metrics` | — | pipeline stage latencies and counters, Prometheus text exposition |
+| `GET /admin/observability` | — | the same numbers as JSON, plus LangSmith tracing status |
+
+`sessionId` and `slotPatch` are both optional and additive: a client that sends neither
+behaves exactly as it did before the plan existed.
+
+## Observability: LangSmith tracing + pipeline metrics
+
+Set `LANGSMITH_API_KEY` (smith.langchain.com → Settings → API Keys) and every chat
+turn becomes one LangSmith trace: a root `chat_turn` run whose children are the
+pipeline stages by name — `nlq.parse`, `plan.merge`, `retrieve`, `policy.retrieve`,
+`rerank`, `llm.generate` — each carrying its real inputs and outputs: the parse
+source and confidence, the plan line and the slots the turn moved, the retrieval
+mode and any widened constraints, the rerank order with scores and reasons, the
+full prompt and reply, and which provider actually served the generation. A bad
+answer is walked back to the stage that caused it in the LangSmith UI instead of
+being reconstructed from logs.
+
+```
+LANGSMITH_API_KEY=lsv2_...
+LANGSMITH_PROJECT=traveliq-assistant                      # optional, the default
+# LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com   # EU / self-hosted
+```
+
+No SDK is installed for this (the zero-new-dependency rule): `app/tracing.py`
+posts to LangSmith's `/runs/batch` REST ingest endpoint through httpx, which
+already ships as the openai package's transport. Uploads are fire-and-forget
+after the response, so tracing never adds latency to a turn; an upload failure is
+logged once and never surfaces to a traveller; no key means nothing leaves the
+process. Client disconnects are traced too — the run that was in flight when the
+browser went away is marked, which makes a spike of abandonments diagnosable.
+
+Alongside the traces, `app/metrics.py` keeps in-process counters and per-stage
+latency distributions (count/errors/avg/p50/p95/max), under the same stage names
+the traces use, readable two ways:
+
+- `GET /admin/observability` — JSON for humans and the admin UI: tracing status,
+  counters (`chat_turns`, `widened_turns`, `zero_result_turns`, `rerank_served`,
+  `served_by.groq`, `chat_client_disconnects`, …) and the stage latency table.
+- `GET /metrics` — the same numbers in Prometheus text exposition format, so
+  Prometheus or a Grafana agent scrapes it with no adapter and no extra package.
+
+`/health` reports `tracing` and `tracingProject` the same way it reports
+`rerank`: off is a documented mode, never silently broken.
 
 ## Run
 

@@ -65,6 +65,32 @@ class Settings(BaseSettings):
     nlq_timeout: float = 8.0
     nlq_cache_size: int = 256
 
+    # --- Assistant: reranking and conversational state ----------------------
+    # The rerank pass (rerank.py) scores a shortlist with the chat model, which
+    # is a cross-encoder in the only sense that matters here: query and candidate
+    # are attended together rather than embedded apart. It costs one extra
+    # completion per chat turn, so it is a switch — off falls back to the
+    # similarity order rag.py already produced, which is a documented degradation
+    # rather than a broken feature.
+    rerank_enabled: bool = True
+    rerank_timeout: float = 12.0  # generous vs nlq: the traveller is already reading cards
+    rerank_candidates: int = 24  # shortlist size; rerank.py caps at its own MAX_CANDIDATES
+
+    # Raw dialogue turns sent alongside the plan state. Deliberately small: the
+    # state IS the memory (see plan.py), and this window only carries tone and
+    # "what did I just say" continuity. The pre-state code sent 8 and re-derived
+    # the plan from scrollback on every turn.
+    assistant_history_turns: int = 4
+
+    # --- Observability: LangSmith tracing (tracing.py) -----------------------
+    # A key switches per-turn pipeline traces on; unset means spans are still
+    # built (they time the stages for metrics.py) but nothing leaves the process.
+    # Uses the standard LANGSMITH_* names so a key from smith.langchain.com works
+    # with no translation. The self-hosted/EU endpoint is an override away.
+    langsmith_api_key: str = ""
+    langsmith_project: str = "traveliq-assistant"
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+
     # --- Catalogue merge thresholds -----------------------------------------
     # Match confidence at or above auto_merge_threshold merges without a human;
     # between review_floor and that it goes to the review queue; below, it is a

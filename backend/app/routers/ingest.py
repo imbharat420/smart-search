@@ -9,6 +9,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from .. import events
 from ..repository import Repo, get_repo
 from ..schemas import IngestRequest, IngestResult
 
@@ -68,4 +69,12 @@ async def ingest(
         result.rejected,
         result.received,
     )
+    # A batch that only queued candidates changed nothing a traveller retrieves, so
+    # it publishes nothing — the derived caches are worth dropping only when the
+    # catalogue itself moved.
+    if result.merged or result.rejected:
+        events.bus.publish(
+            events.CATALOGUE_RELOADED,
+            {"source": sourceKey, "merged": result.merged, "newTrips": result.rejected},
+        )
     return result

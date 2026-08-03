@@ -31,7 +31,7 @@ export function ParsedSummary({ parsed, query, total }: ParsedSummaryProps) {
         <p className="text-xs font-semibold">Read from your message</p>
         <Badge tone={byAi ? 'brand' : 'neutral'} size="sm">
           {byAi ? <Sparkles /> : <Search />}
-          {byAi ? 'Parsed by AI' : 'Keyword fallback'}
+          {byAi ? 'Read by AI' : 'Keyword match'}
         </Badge>
         <span className="text-xs tabular-nums text-muted-foreground">
           {pct(parsed.confidence)} confidence

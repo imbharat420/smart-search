@@ -334,20 +334,35 @@ _MONTH_RANGE_RE = re.compile(
     rf"\b({_MONTH_NAMES})\b\s*(?:to|till|until|through|-|–)\s*\b({_MONTH_NAMES})\b"
 )
 
+# The trailing lookahead, not a \b, and this is load-bearing. A \b here can be
+# satisfied by the boundary *inside* the number: given "about £2,500pp" the greedy
+# digit run backtracks looking for a boundary, finds one between "2" and ",", and
+# the budget parses as £2 — which then filters the entire catalogue away. There is
+# no boundary between a digit and the "pp"/"k" a price is commonly written with
+# either, so "£2500pp" matched nothing at all. Refusing to stop in front of a
+# digit, dot or comma forces the whole figure to be consumed and fixes both.
+_AMOUNT = r"(\d[\d,]*(?:\.\d+)?)\s*(k)?(?![\d.,])"
+
 _BUDGET_RE = re.compile(
     r"(?:under|below|less than|no more than|max(?:imum)?|up to|within|budget(?:\s+of)?|around|about)"
-    r"\s*(?:£|gbp\s*)?\s*(\d[\d,]*(?:\.\d+)?)\s*(k)?\b"
+    r"\s*(?:£|gbp\s*)?\s*" + _AMOUNT
 )
-_PRICE_RE = re.compile(r"£\s*(\d[\d,]*(?:\.\d+)?)\s*(k)?\b")
+_PRICE_RE = re.compile(r"£\s*" + _AMOUNT)
 _DURATION_RE = re.compile(
     r"\b(\d{1,2}|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen|twenty)"
     r"[\s-]*(days?|nights?|weeks?)\b"
 )
 _DIRECT_RE = re.compile(r"\b(direct(?:\s+flights?)?|non[\s-]?stop|no stopovers?|no changes)\b")
+# Every digit run carries (?!\d) so it cannot match half a number. Without it the
+# "for 10 days" in "10 days for a family of 4" reads as a group of ONE: \d{1,2}
+# grabs "10", the day-lookahead rejects it, and the engine backtracks to "1" —
+# where the lookahead now sees "0 days" instead of " days" and happily accepts. The
+# result was a party of 1 on a sentence that says four, which then filters the
+# catalogue on the wrong group size. Same class of bug as _AMOUNT above.
 _GROUP_RE = re.compile(
-    r"(?:group|party|family)\s+of\s+(\d{1,2})"
-    r"|(?:for|with)\s+(\d{1,2})(?!\s*(?:day|night|week|hour|k\b))"
-    r"|(\d{1,2})\s*(?:people|persons|adults|travellers|travelers|guests|of\s+us)"
+    r"(?:group|party|family)\s+of\s+(\d{1,2})(?!\d)"
+    r"|(?:for|with)\s+(\d{1,2})(?!\d)(?!\s*(?:day|night|week|hour|k\b))"
+    r"|\b(\d{1,2})(?!\d)\s*(?:people|persons|adults|travellers|travelers|guests|of\s+us)"
 )
 
 _SCORED_FIELDS = (
@@ -728,6 +743,15 @@ def _cache_put(key: str, parsed: ParsedQuery) -> None:
 
 def cache_stats() -> dict:
     return {"size": len(_cache), "hits": _hits, "misses": _misses}
+
+
+def cache_clear() -> None:
+    """Drop every parse. The heuristic layer reads the synonym vocabulary, so an
+    edit in the admin panel makes each cached parse potentially wrong — and a
+    wrong parse is invisible to the traveller, unlike a slow one. events.py
+    subscribes this to SYNONYM_CHANGED; the counters survive so the hit rate
+    stays comparable across a clear."""
+    _cache.clear()
 
 
 # --- Entry point -----------------------------------------------------------

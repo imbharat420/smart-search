@@ -6,7 +6,8 @@ import { usePageMeta } from '../lib/meta'
 import type { NearMeIntent } from '../lib/nearMe'
 import { parseNearMe } from '../lib/nearMe'
 import { getStoredOrigin, setStoredOrigin } from '../lib/originStore'
-import type { ChatMessage, Guide, ParsedQuery, Trip } from '../types'
+import { getSessionId } from '../lib/sessionStore'
+import type { ChatMessage, Guide, ParsedQuery, PlanSlot, QuickReply, Trip } from '../types'
 import { ChatBubble } from '../components/chat/ChatBubble'
 import type { ThreadMessage } from '../components/chat/ChatBubble'
 import { Composer } from '../components/chat/Composer'
@@ -23,6 +24,20 @@ const HERO_IMAGE = 'https://images.unsplash.com/photo-1531366936337-7c912a4589a7
 
 const STREAM_FAILED =
   'The answer stopped early — the assistant stream closed before it finished. Send the question again, or open Search to browse the catalogue directly.'
+
+// Removing a plan chip still goes through a normal turn: it is the traveller changing
+// their mind, so it belongs in the transcript, and the backend has one door for state
+// changes rather than a second endpoint that could disagree with this one. The patch
+// carries the {clear} sentinel that backend/app/plan.py's merge understands; the
+// sentence is what makes the thread still read like a conversation afterwards.
+const CLEAR_PHRASE: Record<PlanSlot, string> = {
+  duration: "Actually, let's leave the trip length open.",
+  budget: "Actually, let's leave the budget open.",
+  region: "Actually, let's leave the region open.",
+  holidayType: "Actually, let's leave the holiday type open.",
+  pace: "Actually, let's leave the pace open.",
+  groupSize: "Actually, let's leave the group size open.",
+}
 
 export function Assistant() {
   usePageMeta(
@@ -41,6 +56,10 @@ export function Assistant() {
   const end = useRef<HTMLDivElement>(null)
   const pinned = useRef(true)
   const seq = useRef(0)
+  // One id for the whole sitting, so the backend can key the six-slot trip plan on it
+  // (backend/app/sessions.py). Read once rather than per turn — resetSession() is not
+  // wired to anything here, so it cannot change under us.
+  const sessionId = useRef(getSessionId())
 
   useEffect(() => {
     let cancelled = false
@@ -127,7 +146,7 @@ export function Assistant() {
     void answerNearby(replyId, shared, intent.radiusKm, intent.radiusMiles)
   }
 
-  async function send(text: string) {
+  async function send(text: string, slotPatch?: Record<string, unknown>) {
     const question = text.trim()
     if (!question || busy) return
 
@@ -167,11 +186,13 @@ export function Assistant() {
     ]
 
     try {
-      for await (const chunk of api.chat(wire)) {
-        const { token, trips, citations, parsed, done } = chunk
+      for await (const chunk of api.chat(wire, { sessionId: sessionId.current, slotPatch })) {
+        const { token, trips, citations, parsed, state, quickReplies, done } = chunk
         if (token) patch(replyId, (message) => ({ ...message, content: message.content + token }))
         if (trips) patch(replyId, (message) => ({ ...message, trips }))
         if (citations) patch(replyId, (message) => ({ ...message, citations }))
+        if (state) patch(replyId, (message) => ({ ...message, state }))
+        if (quickReplies) patch(replyId, (message) => ({ ...message, quickReplies }))
         if (parsed) {
           patch(replyId, (message) => ({ ...message, parsed }))
           void countMatches(replyId, question, parsed)
@@ -188,6 +209,33 @@ export function Assistant() {
       setBusy(false)
     }
   }
+
+  // A tapped chip is a normal turn carrying an exact patch, so the backend never has to
+  // read its own label back through the parser.
+  function handleQuickReply(messageId: string, reply: QuickReply) {
+    patch(messageId, (message) => ({ ...message, quickRepliesUsed: true }))
+    void send(reply.value, reply.patch)
+  }
+
+  function handleClearSlot(slot: PlanSlot) {
+    void send(CLEAR_PHRASE[slot], { clear: slot })
+  }
+
+  // Only the newest unanswered chip row is live, and only the newest plan is editable.
+  // Older turns render read-only: their panels are a record of what the assistant knew
+  // at the time, and letting someone edit a stale snapshot would write back a plan that
+  // has since moved on. While a turn is in flight both are frozen, which is also what
+  // gives the chips their disabled state (see ChatBubble).
+  const reversed = [...messages].reverse()
+  const liveChips = busy ? undefined : reversed.find((m) => m.quickReplies && !m.quickRepliesUsed)?.id
+  const livePlan = busy ? undefined : reversed.find((m) => m.state)?.id
+  // Follow-up suggestions ride the newest finished reply, but only when that turn is
+  // not already asking its own question — two rows of things to tap would compete.
+  const newestReply = reversed.find((m) => m.role === 'assistant')
+  const liveFollowUps =
+    busy || !newestReply || newestReply.streaming || newestReply.id === liveChips
+      ? undefined
+      : newestReply.id
 
   const live = health !== null && health.status !== 'offline'
 
@@ -245,6 +293,15 @@ export function Assistant() {
                       message.needsLocation
                         ? (shared) => handleShareLocation(message.id, shared, message.needsLocation!)
                         : undefined
+                    }
+                    onQuickReply={
+                      message.id === liveChips
+                        ? (reply) => handleQuickReply(message.id, reply)
+                        : undefined
+                    }
+                    onClearSlot={message.id === livePlan ? handleClearSlot : undefined}
+                    onFollowUp={
+                      message.id === liveFollowUps ? (prompt) => void send(prompt) : undefined
                     }
                   />
                 </li>

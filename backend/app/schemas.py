@@ -4,7 +4,7 @@ types exactly (see src/types.ts) so the JSON needs no translation layer.
 These are the shapes the API speaks, not the shapes the database stores — the
 repository is what maps between them (snake_case columns, Decimal money, uuid
 ids) and it is the only place that knows about both."""
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -175,13 +175,87 @@ class Citation(BaseModel):
     sourceId: str
 
 
+# ---- Assistant plan state ------------------------------------------------
+# The six parameters the assistant tracks across a conversation. They live in one
+# explicit object rather than being re-derived from the transcript on every turn:
+# a JSON state is cheap to send, cannot drift from what the UI is showing, and
+# makes "change my mind about the budget" a field write instead of a contradiction
+# the model has to notice in scrollback. app/plan.py owns the merge rules.
+
+BudgetBand = Literal["budget", "mid", "luxury"]
+Pace = Literal["slow", "balanced", "packed"]
+# The slot names are the wire vocabulary: chip payloads, skip counters and the
+# frontend's summary panel all key off these exact strings.
+PlanSlot = Literal["duration", "budget", "region", "holidayType", "pace", "groupSize"]
+
+
+class TripPlanState(BaseModel):
+    """What the assistant knows about the trip so far.
+
+    Every field is optional and stays optional — a slot the traveller skipped is
+    indistinguishable from one never asked about, which is the point: retrieval
+    runs on whatever is filled and never blocks waiting for the rest.
+    """
+
+    # -- The six tracked parameters --
+    durationDays: Optional[int] = None
+    budgetBand: Optional[BudgetBand] = None
+    # Set when the traveller named a number rather than picking a band. Both can
+    # be present: a band from a chip, then a precise figure typed afterwards.
+    maxPrice: Optional[float] = None
+    region: Optional[str] = None  # a bucket key from plan.region_buckets()
+    holidayType: Optional[list[str]] = None  # Trip.themes vocabulary
+    pace: Optional[Pace] = None  # ranking signal only — no catalogue column
+    groupSize: Optional[int] = None
+
+    # -- Bookkeeping, so loop-breaking is a rule rather than a judgement call --
+    # Per-slot count of skips and reversals; plan.py stops asking at the ceiling.
+    skipCounts: dict[str, int] = Field(default_factory=dict)
+    # Per-slot count of times we have put the question. Guards the case where a
+    # traveller answers something unrelated and the same slot comes round again.
+    askedCounts: dict[str, int] = Field(default_factory=dict)
+    turnCount: int = 0
+    # Slots whose value predates a change that may have invalidated it — e.g. a
+    # budget agreed for Europe, then the region moved to Asia. Kept, not erased:
+    # a stale answer is better than no answer, and the assistant re-confirms in
+    # one line instead of asking from scratch. Written by events.py subscribers.
+    unconfirmed: list[str] = Field(default_factory=list)
+
+
+class QuickReply(BaseModel):
+    """One tappable chip. `value` is what lands in the transcript so the thread
+    reads like a conversation; `patch` is what actually updates the state, so a
+    tap never depends on the parser re-reading its own label."""
+
+    label: str
+    value: str
+    patch: dict[str, Any] = Field(default_factory=dict)
+
+
+class QuickReplyGroup(BaseModel):
+    """The chips accompanying one question. Always exactly one slot per turn, and
+    always with a skip — `skip` is a complete answer, not a way to stall."""
+
+    slot: PlanSlot
+    prompt: str
+    options: list[QuickReply] = Field(default_factory=list)
+    skip: QuickReply
+
+
 class ChatChunk(BaseModel):
     """One streamed piece of a chat response. Serialised with exclude_none so
-    each SSE event carries only the field it represents."""
+    each SSE event carries only the field it represents.
+
+    Chunk order is the contract the Assistant screen renders against: parsed,
+    then state, then trips, then quickReplies, then tokens, then citations, then
+    done. See app/chat.py for why.
+    """
     token: Optional[str] = None
     trips: Optional[list[Trip]] = None
     citations: Optional[list[Citation]] = None
     parsed: Optional[ParsedQuery] = None
+    state: Optional[TripPlanState] = None
+    quickReplies: Optional[QuickReplyGroup] = None
     done: Optional[bool] = None
 
 
@@ -296,6 +370,14 @@ class EventRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[Message]
+    # Opaque per-conversation id, minted by the browser (see src/lib/sessionStore.ts).
+    # Absent means "no memory" — the turn still answers, it just starts from an
+    # empty plan, which is exactly how the endpoint behaved before state existed.
+    sessionId: Optional[str] = None
+    # Set when the traveller tapped a chip rather than typing. Applied verbatim so
+    # a tap is exact, instead of round-tripping the chip's own label through the
+    # parser and hoping it reads back the same.
+    slotPatch: Optional[dict[str, Any]] = None
 
 
 class IngestRequest(BaseModel):
@@ -323,3 +405,15 @@ class Health(BaseModel):
     chatModel: Optional[str] = None
     fallbacks: list[str] = Field(default_factory=list)
     embedProvider: Optional[str] = None
+    # Assistant capabilities, reported because every one of them has a documented
+    # degraded mode — an operator seeing `graphNodes: 0` or `rerank: false` should
+    # be able to tell "switched off" from "silently broken" without reading logs.
+    sessionStore: Optional[Literal["postgres", "memory"]] = None
+    graphNodes: int = 0
+    graphEdges: int = 0
+    rerank: bool = False
+    # Observability: whether per-turn pipeline traces are leaving for LangSmith,
+    # and under which project — same "switched off vs silently broken" reporting
+    # as the fields above. Off is a documented mode, never an error.
+    tracing: bool = False
+    tracingProject: Optional[str] = None

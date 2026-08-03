@@ -22,11 +22,26 @@ router = APIRouter()
 async def chat(req: ChatRequest, repo: Repo = Depends(get_repo)) -> StreamingResponse:
     # Read the catalogue before the response starts: a repository failure here is
     # a plain 500, which is far easier to debug than a stream that opens and dies.
+    #
+    # Promotions come along because a trip an editor has hidden must not be
+    # recommended by the assistant either — retrieve_for_chat used to pass an empty
+    # list, which meant merchandising applied on /search but not in conversation.
+    # Synonyms come along for the same reason /search expands them: "aurora" should
+    # reach the Northern Lights trips here too.
     trips = await repo.trips()
+    promotions = await repo.promotions()
+    synonyms = await repo.synonyms()
 
     async def event_stream():
         try:
-            async for chunk in stream_chat(req.messages, trips):
+            async for chunk in stream_chat(
+                req.messages,
+                trips,
+                promotions=promotions,
+                synonyms=synonyms,
+                session_id=req.sessionId,
+                slot_patch=req.slotPatch,
+            ):
                 payload = json.dumps(chunk.model_dump(exclude_none=True))
                 yield f"data: {payload}\n\n"
         except Exception as exc:  # surface errors to the client as a final chunk

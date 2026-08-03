@@ -573,7 +573,15 @@ def suggestions(
     return lines[:limit]
 
 
-def _best_policy_lexical(query: str) -> Optional[dict]:
+def policy_by_keyword(query: str) -> Optional[dict]:
+    """The policy whose keyword list the query literally mentions, or None.
+
+    Public because it is the sharpest available signal that a turn is asking about
+    booking conditions rather than planning a trip: the words are in the sentence
+    or they are not. chat.py uses it to decide whether a follow-up question about
+    pace or budget would be a non-sequitur — the AI parse is no good for that,
+    since it will happily read a theme out of "what is your cancellation policy?".
+    """
     lower = query.lower()
     for doc in POLICIES:
         if any(word in lower for word in doc["keywords"]):
@@ -629,6 +637,21 @@ class TripIndex:
         self._qv_cache.clear()
         self.built = True
         log.info("indexed %d trips + %d policies via %s", len(trips), len(POLICIES), provider.label)
+
+    def invalidate(self) -> None:
+        """Mark the index stale so the next `build()` re-embeds instead of
+        returning early.
+
+        `build()` treats the trip id list as its version marker, which misses an
+        *edited* trip — same id, changed description, stale vector. This clears
+        that marker. It deliberately leaves the existing vectors in place and
+        `built` True: re-embedding needs an await and the event bus is
+        synchronous, so the honest behaviour is to keep serving slightly stale
+        semantics until something calls `build()` again (startup, or ingest after
+        a merge) rather than dropping the whole index to the lexical path on every
+        admin edit."""
+        self._built_ids = []
+        self._qv_cache.clear()
 
     async def _embed_query(self, query: str) -> np.ndarray:
         cached = self._qv_cache.get(query)
@@ -750,6 +773,27 @@ class TripIndex:
         facets = _facets([row[0] for row in relevant], constraints)
         return results, facets, mode
 
+    async def retrieve_policy(self, query: str) -> Optional[dict]:
+        """The single most relevant booking-conditions document, or None.
+
+        Keyword match first, then the embedding if one is available and clears
+        `min_policy` — the semantic hit wins because it catches the phrasings the
+        keyword list does not ("what if I have to pull out" is a cancellation
+        question containing none of the cancellation keywords).
+
+        Split out of `retrieve_for_chat` so chat.py can do its own trip retrieval
+        (candidate generation plus reranking) without either duplicating this or
+        paying for a search it is about to throw away.
+        """
+        policy = policy_by_keyword(query)
+        qv = await self._query_vec(query) if self._policy_vecs is not None else None
+        if qv is not None:
+            sims = self._policy_vecs @ qv
+            best = int(np.argmax(sims))
+            if float(sims[best]) >= self.band.min_policy:
+                policy = POLICIES[best]
+        return policy
+
     async def retrieve_for_chat(
         self, query: str, trips: list[Trip]
     ) -> tuple[list[Trip], Optional[dict]]:
@@ -759,15 +803,7 @@ class TripIndex:
         parsed = nlq.parse_heuristic(query)
         results, _, _ = await self.search(query, parsed, None, trips, [], [])
         top = [r.trip for r in results][: settings.chat_top_k]
-
-        policy = _best_policy_lexical(query)
-        qv = await self._query_vec(query) if self._policy_vecs is not None else None
-        if qv is not None:
-            sims = self._policy_vecs @ qv
-            best = int(np.argmax(sims))
-            if float(sims[best]) >= self.band.min_policy:
-                policy = POLICIES[best]
-        return top, policy
+        return top, await self.retrieve_policy(query)
 
     def relaxations(
         self, parsed: ParsedQuery, filters: Optional[SearchFilters], trips: list[Trip], limit: int = 3

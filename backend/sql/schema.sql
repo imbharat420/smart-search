@@ -1,6 +1,6 @@
 -- TravelIQ Search Engine - PostgreSQL schema (Postgres 16)
 --
--- The reviewable artefact. backend/app/models.py declares the same 19 tables for
+-- The reviewable artefact. backend/app/models.py declares the same 20 tables for
 -- SQLAlchemy and the two are kept in step by hand; if they ever disagree, this is
 -- the file a DBA signs off and the models follow it.
 --
@@ -372,6 +372,31 @@ CREATE TABLE IF NOT EXISTS search_events (
 );
 
 
+-- ================================================ conversational state ======
+
+-- One row per assistant conversation: the traveller's plan as it stands. The six
+-- tracked slots are one jsonb blob rather than six columns because the shape is the
+-- assistant's, not the catalogue's - it moves whenever the conversational design
+-- moves, and a column per slot would mean a migration every time the flow changes.
+-- Nothing in SQL filters or joins on it: app/sessions.py reads the whole object back
+-- for one session id and merges it in Python.
+CREATE TABLE IF NOT EXISTS assistant_sessions (
+    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- Minted by the browser (crypto.randomUUID, kept in sessionStorage) and never
+    -- authenticated. UNIQUE because every chat turn upserts on it.
+    session_id varchar(64) NOT NULL UNIQUE,
+    state      jsonb NOT NULL DEFAULT '{}',   -- one TripPlanState, unset slots omitted
+    -- Lifted out of the blob so "how long do conversations run?" is one query.
+    turn_count integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    -- Trigger-maintained (see the bottom of this file). A sweeper deleting plans
+    -- older than a few days would read this column and want an index on it;
+    -- nothing sweeps yet, so the index is not here to be misleading.
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_assistant_sessions_turn_count CHECK (turn_count >= 0)
+);
+
+
 -- ========================================================== commerce ========
 
 -- Payment and confirmation are out of scope for the POC: POST /events records a
@@ -444,7 +469,7 @@ DECLARE
 BEGIN
     FOREACH tbl IN ARRAY ARRAY[
         'users', 'destinations', 'suppliers', 'trips', 'guides', 'pois',
-        'synonyms', 'search_config', 'bookings'
+        'synonyms', 'search_config', 'assistant_sessions', 'bookings'
     ] LOOP
         EXECUTE format('DROP TRIGGER IF EXISTS trg_%1$s_updated_at ON %1$I', tbl);
         EXECUTE format(

@@ -1,11 +1,15 @@
 """The admin control panel: search setup, synonyms, promotions, data sources and
 the merge review queue.
 
-Two rules hold across every route here. Each mutation writes an audit_log entry
+Three rules hold across every route here. Each mutation writes an audit_log entry
 through the repository, because these settings change what a traveller sees
 without a deploy and "who turned the price filter off?" has to be answerable.
-And each payload is checked here, so a bad value comes back as a 400 naming the
-problem rather than as a 500 from the layer that trusted it.
+Each payload is checked here, so a bad value comes back as a 400 naming the
+problem rather than as a 500 from the layer that trusted it. And each mutation
+that changes what retrieval will do publishes an events.py event, because the
+derived caches (nlq.py's parse cache, graph.py's adjacency) would otherwise serve
+the old configuration until the process restarted — an edit that appears to save
+and then does nothing is the worst of the three failure modes.
 """
 from __future__ import annotations
 
@@ -16,6 +20,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from .. import events, tracing
+from ..metrics import metrics
 from ..repository import Repo, get_repo
 from ..schemas import (
     AdminConfig,
@@ -164,6 +170,7 @@ async def add_synonym(
         {"id": saved.id, "term": saved.term, "alternatives": saved.alternatives,
          "market": saved.market},
     )
+    events.bus.publish(events.SYNONYM_CHANGED, {"id": saved.id, "term": saved.term})
     return saved
 
 
@@ -180,6 +187,7 @@ async def delete_synonym(
         raise HTTPException(status_code=404, detail=f"no synonym with id {sid}")
     await repo.synonym_delete(sid)
     await repo.audit(actor, "synonym.delete", {"id": sid, "term": doomed.term})
+    events.bus.publish(events.SYNONYM_CHANGED, {"id": sid, "term": doomed.term})
     return [s for s in current if s.id != sid]
 
 
@@ -249,6 +257,7 @@ async def add_promotion(
         {"id": saved.id, "tripId": saved.tripId, "tripTitle": saved.tripTitle,
          "kind": saved.kind, "weight": saved.weight},
     )
+    events.bus.publish(events.PROMOTION_CHANGED, {"id": saved.id, "tripId": saved.tripId})
     return saved
 
 
@@ -268,6 +277,7 @@ async def delete_promotion(
         "promotion.delete",
         {"id": pid, "tripId": doomed.tripId, "kind": doomed.kind},
     )
+    events.bus.publish(events.PROMOTION_CHANGED, {"id": pid, "tripId": doomed.tripId})
     return [p for p in current if p.id != pid]
 
 
@@ -326,6 +336,11 @@ async def _resolve(cid: str, approve: bool, repo: Repo, actor: str) -> MergeCand
             "reasons": candidate.reasons,
         },
     )
+    if approve:
+        # An approval merges a source record into a trip, so its copy — and
+        # therefore its embedding and its graph edges — have moved. A rejection
+        # changes nothing a traveller can see, so it publishes nothing.
+        events.bus.publish(events.TRIP_CHANGED, {"candidateId": cid, "title": candidate.leftTitle})
     return candidate
 
 
@@ -345,3 +360,18 @@ async def reject_review(
     actor: str = Depends(_actor),
 ) -> MergeCandidate:
     return await _resolve(cid, False, repo, actor)
+
+
+# --- Observability -----------------------------------------------------------
+
+@router.get("/admin/observability")
+def observability() -> dict:
+    """The pipeline's own account of itself: whether traces are leaving for
+    LangSmith and where, plus the in-process stage latencies and counters that
+    metrics.py keeps. Read-only, so no audit entry and no event — this is the
+    one admin surface that only ever describes the system.
+
+    The same numbers are exposed at /metrics in Prometheus text format for
+    scrapers; this JSON shape is for humans and the admin UI.
+    """
+    return {"tracing": tracing.status(), **metrics.snapshot()}

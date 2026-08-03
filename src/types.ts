@@ -158,12 +158,57 @@ export interface Citation {
   sourceId: string
 }
 
-/** One streamed piece of a chat response. */
+// ---- assistant plan state ----
+// Mirrors backend/app/schemas.py TripPlanState / QuickReply / QuickReplyGroup.
+// The six parameters the assistant tracks across a conversation, held as one
+// explicit object rather than re-read from the transcript each turn.
+
+export type BudgetBand = 'budget' | 'mid' | 'luxury'
+export type Pace = 'slow' | 'balanced' | 'packed'
+export type PlanSlot = 'duration' | 'budget' | 'region' | 'holidayType' | 'pace' | 'groupSize'
+
+export interface TripPlanState {
+  durationDays?: number
+  budgetBand?: BudgetBand
+  maxPrice?: number
+  region?: string
+  holidayType?: string[]
+  pace?: Pace
+  groupSize?: number
+  // Bookkeeping the backend owns; the UI reads `unconfirmed` to mark a slot that
+  // a later change may have invalidated, and otherwise leaves these alone.
+  skipCounts?: Record<string, number>
+  askedCounts?: Record<string, number>
+  turnCount?: number
+  unconfirmed?: string[]
+}
+
+/** One tappable chip. `value` lands in the transcript, `patch` updates the state. */
+export interface QuickReply {
+  label: string
+  value: string
+  patch?: Record<string, unknown>
+}
+
+/** The chips accompanying one question — one slot per turn, always with a skip. */
+export interface QuickReplyGroup {
+  slot: PlanSlot
+  prompt: string
+  options: QuickReply[]
+  skip: QuickReply
+}
+
+/**
+ * One streamed piece of a chat response. Arrival order is the contract:
+ * parsed, state, trips, quickReplies, tokens, citations, done.
+ */
 export interface ChatChunk {
   token?: string
   trips?: Trip[]
   citations?: Citation[]
   parsed?: ParsedQuery
+  state?: TripPlanState
+  quickReplies?: QuickReplyGroup
   done?: boolean
 }
 
@@ -181,6 +226,11 @@ export interface UiMessage {
   trips?: Trip[]
   citations?: Citation[]
   streaming?: boolean
+  // The plan as it stood after this turn, and the chips this turn is asking with.
+  // Both are per-message rather than per-thread so scrolling back shows what the
+  // assistant knew at the time instead of rewriting history.
+  state?: TripPlanState
+  quickReplies?: QuickReplyGroup
   // "near me" handling (src/lib/nearMe.ts) is a client-side shortcut around the
   // place index, not part of the streamed trip-chat contract — set at most one
   // of the two below at a time.

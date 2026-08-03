@@ -1,19 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import type { Citation, ParsedQuery, UiMessage } from '../../types'
+import type { Citation, ParsedQuery, PlanSlot, QuickReply, UiMessage } from '../../types'
 import type { Coords } from '../../lib/geo'
 import { CitationPills } from './CitationPills'
+import { FollowUpSuggestions, buildFollowUps } from './FollowUpSuggestions'
 import { InlinePlaceCard } from './InlinePlaceCard'
 import { InlineTripCard } from './InlineTripCard'
+import { MessageProse } from './MessageProse'
 import { ParsedSummary } from './ParsedSummary'
+import { PlanSummary } from './PlanSummary'
+import { QuickReplies } from './QuickReplies'
 import { ShareLocationPrompt } from './ShareLocationPrompt'
 
-// UiMessage plus the three things only the assistant screen tracks: the question this reply
-// answers, what the query parser pulled out of it, and how many trips those filters match.
+// UiMessage plus the four things only the assistant screen tracks: the question this reply
+// answers, what the query parser pulled out of it, how many trips those filters match, and
+// whether this turn's chips have already been used.
 export interface ThreadMessage extends UiMessage {
   question?: string
   parsed?: ParsedQuery
   matchTotal?: number
+  quickRepliesUsed?: boolean
 }
 
 const FLASH_MS = 1200
@@ -22,9 +28,21 @@ interface ChatBubbleProps {
   message: ThreadMessage
   // Only needed when message.needsLocation is set — see Assistant.tsx.
   onShareLocation?: (origin: Coords) => void
+  // All three omitted for historical turns, which renders them read-only: only the newest
+  // reply's chips and follow-ups are live, and a plan slot is only editable from the
+  // latest state.
+  onQuickReply?: (reply: QuickReply) => void
+  onClearSlot?: (slot: PlanSlot) => void
+  onFollowUp?: (prompt: string) => void
 }
 
-export function ChatBubble({ message, onShareLocation }: ChatBubbleProps) {
+export function ChatBubble({
+  message,
+  onShareLocation,
+  onQuickReply,
+  onClearSlot,
+  onFollowUp,
+}: ChatBubbleProps) {
   const cards = useRef(new Map<string, HTMLAnchorElement>())
   const flashTimer = useRef<number | undefined>(undefined)
   const [flashing, setFlashing] = useState<string | null>(null)
@@ -72,9 +90,16 @@ export function ChatBubble({ message, onShareLocation }: ChatBubbleProps) {
       <div className="flex min-w-0 flex-1 flex-col gap-3">
         <div className="rounded-2xl rounded-tl-md border bg-card px-4 py-3 text-[15px] leading-relaxed">
           {message.content ? (
-            // Plain text on purpose: rendering markdown would need a sanitising renderer, which
-            // this POC does not ship.
-            <span className="whitespace-pre-wrap">{message.content}</span>
+            // Plain text plus inline citation markers on purpose: rendering markdown would need
+            // a sanitising renderer, which this POC does not ship. MessageProse swaps the
+            // model's bracketed source ids for the numbered markers the Sources row uses,
+            // so no raw trip or policy id ever reaches the reader.
+            <MessageProse
+              content={message.content}
+              citations={message.citations}
+              streaming={streaming}
+              onCitation={reveal}
+            />
           ) : (
             streaming && (
               <span className="text-muted-foreground">Retrieving trips and booking conditions</span>
@@ -125,6 +150,28 @@ export function ChatBubble({ message, onShareLocation }: ChatBubbleProps) {
 
         {message.needsLocation && onShareLocation && (
           <ShareLocationPrompt onShare={onShareLocation} />
+        )}
+
+        {/* After the cards, because the reply's own shape is answer-then-follow-up: the
+            model addresses the question, the trips land, then it asks one thing more. */}
+        {message.quickReplies && (
+          <QuickReplies
+            group={message.quickReplies}
+            onPick={onQuickReply ?? (() => {})}
+            disabled={message.streaming || !onQuickReply}
+            answered={message.quickRepliesUsed}
+          />
+        )}
+
+        {/* The turns the plan chips do not cover — a finished plan, a loop-broken one,
+            or a booking-conditions answer — still end with somewhere to go next.
+            Live only on the newest completed reply, like the chips above. */}
+        {onFollowUp && !streaming && (
+          <FollowUpSuggestions suggestions={buildFollowUps(message)} onPick={onFollowUp} />
+        )}
+
+        {message.state && (
+          <PlanSummary state={message.state} onClear={onClearSlot} />
         )}
 
         {message.parsed && (
