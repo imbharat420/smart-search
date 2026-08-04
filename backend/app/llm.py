@@ -191,7 +191,8 @@ async def embed(
     if not chain:
         raise NoProviderConfigured(
             "no embedding-capable provider configured "
-            "(Gemini, NVIDIA NIM, Z.AI or OpenAI — Groq and Cerebras are chat-only)"
+            "(Gemini, NVIDIA NIM, Z.AI, Mistral, SambaNova, Cohere, Hugging Face "
+            "or OpenAI — Groq, Cerebras, OpenRouter and DeepSeek are chat-only)"
         )
 
     attempts: list[tuple[str, str]] = []
@@ -208,6 +209,8 @@ async def embed(
 
 
 async def _embed_with(provider: Provider, texts: list[str], input_type: str) -> list[list[float]]:
+    if provider.spec.embed_wire == "hf-pipeline":
+        return await _embed_hf_pipeline(provider, texts)
     client = client_for(provider)
     batch = max(1, provider.spec.embed_batch)
     out: list[list[float]] = []
@@ -225,4 +228,33 @@ async def _embed_with(provider: Provider, texts: list[str], input_type: str) -> 
         if all(item.index is not None for item in items):
             items = sorted(items, key=lambda d: d.index)
         out.extend(item.embedding for item in items)
+    return out
+
+
+async def _embed_hf_pipeline(provider: Provider, texts: list[str]) -> list[list[float]]:
+    """Hugging Face's OpenAI-compatible router serves chat only, so embeddings
+    go to the hf-inference feature-extraction pipeline instead. httpx already
+    ships as the openai package's transport, so no new dependency is involved.
+
+    The default model (sentence-transformers/*) returns one pooled vector per
+    input; a raw transformer would return token-level vectors and won't work
+    here — stick to sentence-transformers models for HUGGINGFACE_EMBED_MODEL.
+    """
+    import httpx
+
+    url = (
+        "https://router.huggingface.co/hf-inference/models/"
+        f"{provider.embed_model}/pipeline/feature-extraction"
+    )
+    batch = max(1, provider.spec.embed_batch)
+    out: list[list[float]] = []
+    async with httpx.AsyncClient(timeout=settings.llm_timeout) as client:
+        for start in range(0, len(texts), batch):
+            resp = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {provider.api_key}"},
+                json={"inputs": texts[start : start + batch]},
+            )
+            resp.raise_for_status()
+            out.extend(resp.json())
     return out

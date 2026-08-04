@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .providers import PROVIDERS, DEFAULT_ORDER, SimBand
@@ -20,12 +21,27 @@ class Settings(BaseSettings):
     llm_timeout: float = 30.0  # per request, seconds — stops a dead provider stalling the chain
     chat_temperature: float = 0.3
 
-    # --- API keys (set as many as you like; all but OpenAI have free tiers) --
+    # --- API keys (set as many as you like; all but OpenAI/DeepSeek have free
+    # tiers). Mistral and Hugging Face accept the env names their own docs and
+    # ecosystems hand out, so a pasted key works without renaming.
     groq_api_key: str = ""
     cerebras_api_key: str = ""
     gemini_api_key: str = ""
     nvidia_api_key: str = ""
     zai_api_key: str = ""
+    mistral_api_key: str = Field(
+        "", validation_alias=AliasChoices("MISTRAL_API_KEY", "MISTRAL_AI")
+    )
+    sambanova_api_key: str = ""
+    cohere_api_key: str = ""
+    openrouter_api_key: str = ""
+    huggingface_api_key: str = Field(
+        "",
+        validation_alias=AliasChoices(
+            "HUGGINGFACE_API_KEY", "HF_TOKEN", "HUGGINGFACEHUB_ACCESS_TOKEN"
+        ),
+    )
+    deepseek_api_key: str = ""
     openai_api_key: str = ""
 
     # --- Per-provider model overrides ("" -> registry default) --------------
@@ -34,11 +50,21 @@ class Settings(BaseSettings):
     gemini_chat_model: str = ""
     nvidia_chat_model: str = ""
     zai_chat_model: str = ""
+    mistral_chat_model: str = ""
+    sambanova_chat_model: str = ""
+    cohere_chat_model: str = ""
+    openrouter_chat_model: str = ""
+    huggingface_chat_model: str = ""
+    deepseek_chat_model: str = ""
     openai_chat_model: str = ""
 
     gemini_embed_model: str = ""
     nvidia_embed_model: str = ""
     zai_embed_model: str = ""
+    mistral_embed_model: str = ""
+    sambanova_embed_model: str = ""
+    cohere_embed_model: str = ""
+    huggingface_embed_model: str = ""
     openai_embed_model: str = ""
 
     # Pre-multi-provider names. Both only ever held OpenAI model ids, so they
