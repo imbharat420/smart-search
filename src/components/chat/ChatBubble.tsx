@@ -90,10 +90,10 @@ export function ChatBubble({
       <div className="flex min-w-0 flex-1 flex-col gap-3">
         <div className="rounded-2xl rounded-tl-md border bg-card px-4 py-3 text-[15px] leading-relaxed">
           {message.content ? (
-            // Plain text plus inline citation markers on purpose: rendering markdown would need
-            // a sanitising renderer, which this POC does not ship. MessageProse swaps the
-            // model's bracketed source ids for the numbered markers the Sources row uses,
-            // so no raw trip or policy id ever reaches the reader.
+            // MessageProse renders the light markdown the model actually emits (bullets,
+            // bold, headings) as React nodes — nothing is parsed as HTML, so no sanitiser
+            // is needed. It also swaps the model's bracketed source ids for the numbered
+            // markers the Sources row uses, so no raw trip or policy id reaches the reader.
             <MessageProse
               content={message.content}
               citations={message.citations}
