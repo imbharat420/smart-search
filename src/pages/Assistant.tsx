@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import { History } from 'lucide-react'
 import { api } from '../lib/api'
 import type { Coords } from '../lib/geo'
 import { milesBetween } from '../lib/geo'
@@ -6,13 +8,24 @@ import { usePageMeta } from '../lib/meta'
 import type { NearMeIntent } from '../lib/nearMe'
 import { parseNearMe } from '../lib/nearMe'
 import { getStoredOrigin, setStoredOrigin } from '../lib/originStore'
-import { getSessionId } from '../lib/sessionStore'
-import type { ChatMessage, Guide, ParsedQuery, PlanSlot, QuickReply, Trip } from '../types'
+import { getSessionId, resetSession, setSessionId } from '../lib/sessionStore'
+import type {
+  ChatHistoryResponse,
+  ChatMessage,
+  ChatSessionMeta,
+  Guide,
+  ParsedQuery,
+  PlanSlot,
+  QuickReply,
+  Trip,
+} from '../types'
 import { ChatBubble } from '../components/chat/ChatBubble'
 import type { ThreadMessage } from '../components/chat/ChatBubble'
+import { ChatHistoryPanel } from '../components/chat/ChatHistoryPanel'
 import { Composer } from '../components/chat/Composer'
 import { DiscoveryRails } from '../components/chat/DiscoveryRails'
 import { ModelPill } from '../components/chat/ModelPill'
+import { PlanBar } from '../components/chat/PlanBar'
 import { SuggestedPrompts } from '../components/chat/SuggestedPrompts'
 import { parsedToFilters } from '../components/chat/parsedFilters'
 
@@ -56,10 +69,130 @@ export function Assistant() {
   const end = useRef<HTMLDivElement>(null)
   const pinned = useRef(true)
   const seq = useRef(0)
-  // One id for the whole sitting, so the backend can key the six-slot trip plan on it
-  // (backend/app/sessions.py). Read once rather than per turn — resetSession() is not
-  // wired to anything here, so it cannot change under us.
-  const sessionId = useRef(getSessionId())
+  // The conversation id lives in the URL — /assistant/<id> — and keys both the
+  // six-slot trip plan and the stored transcript (backend/app/sessions.py). The
+  // URL is the source of truth: the drawer, New chat and the back button all
+  // just navigate, and the route effect below loads whatever thread the URL
+  // names. localStorage only remembers the *last* id, for bare /assistant.
+  const navigate = useNavigate()
+  const { sessionId: routeId } = useParams<{ sessionId: string }>()
+
+  // Bare /assistant normalises to the last (or a fresh) conversation's URL, so
+  // every open chat is bookmarkable and history entries always name a thread.
+  useEffect(() => {
+    if (!routeId) navigate(`/assistant/${getSessionId()}`, { replace: true })
+  }, [routeId, navigate])
+
+  // The routed chat becomes "the last one" that bare /assistant resumes.
+  useEffect(() => {
+    if (routeId) setSessionId(routeId)
+  }, [routeId])
+
+  // The chat drawer: every stored conversation, and whether it is on screen.
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [sessions, setSessions] = useState<ChatSessionMeta[]>([])
+
+  // One stored transcript as ThreadMessages. Shared by the on-mount restore and
+  // by picking a chat from the drawer, so both rebuild the screen identically.
+  function buildThread(history: ChatHistoryResponse): ThreadMessage[] {
+    let lastQuestion: string | undefined
+    const thread: ThreadMessage[] = history.messages.map((message, i) => {
+      const id = `h${++seq.current}`
+      if (message.role === 'user') {
+        lastQuestion = message.content
+        return { id, role: 'user' as const, content: message.content }
+      }
+      return {
+        id,
+        role: 'assistant' as const,
+        content: message.content,
+        trips: message.trips,
+        citations: message.citations,
+        quickReplies: message.quickReplies,
+        parsed: message.parsed,
+        provider: message.provider,
+        model: message.model,
+        question: lastQuestion,
+        // Only the thread's final chips may still be live — every earlier row
+        // was already answered or superseded by the turns beneath it.
+        quickRepliesUsed: i < history.messages.length - 1,
+      }
+    })
+
+    // The plan as the last turn left it rides on the newest reply, the one
+    // place PlanSummary is editable (see livePlan below).
+    if (history.state) {
+      for (let i = thread.length - 1; i >= 0; i--) {
+        if (thread[i].role === 'assistant') {
+          thread[i] = { ...thread[i], state: history.state }
+          break
+        }
+      }
+    }
+    return thread
+  }
+
+  // Load the routed conversation — on mount, and again whenever the drawer, New
+  // chat or the back button moves to another chat's URL. The backend keeps the
+  // transcript per id; offline this quietly renders an empty thread and the
+  // screen looks like a fresh chat.
+  useEffect(() => {
+    if (!routeId) return
+    let cancelled = false
+    // Switching URLs clears the screen first, so chat A's thread is never on
+    // screen under chat B's address while B loads.
+    setMessages([])
+    setDraft('')
+
+    const load = async () => {
+      const [history, list] = await Promise.all([
+        api.chatHistory(routeId),
+        api.chatSessions(),
+      ])
+      if (cancelled) return
+      setSessions(list)
+      if (history.messages.length === 0) return
+      const restored = buildThread(history)
+      // Never clobber a message the traveller managed to send while this loaded.
+      setMessages((prev) => (prev.length > 0 ? prev : restored))
+    }
+
+    void load()
+    return () => {
+      cancelled = true
+    }
+    // buildThread only touches refs, so routeId is genuinely the only dependency.
+  }, [routeId])
+
+  // A fresh conversation: mint a new id and go to its URL — the route effect
+  // above does the clearing. The old chat stays stored under its own id.
+  function startNewChat() {
+    if (busy) return
+    resetSession()
+    setHistoryOpen(false)
+    navigate(`/assistant/${getSessionId()}`)
+  }
+
+  // Drawer actions. The PATCH/DELETE endpoints answer with the refreshed list,
+  // so applying their response keeps one source of truth for the ordering.
+  function applySessions(next: ChatSessionMeta[] | null) {
+    if (next) setSessions(next)
+  }
+
+  function openChat(id: string) {
+    setHistoryOpen(false)
+    if (busy || id === routeId) return
+    navigate(`/assistant/${encodeURIComponent(id)}`)
+  }
+
+  async function handleDeleteChat(id: string) {
+    applySessions(await api.deleteChatSession(id))
+    // Deleting the open conversation leaves nothing at its URL — start fresh.
+    if (id === routeId) {
+      resetSession()
+      navigate(`/assistant/${getSessionId()}`, { replace: true })
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -148,7 +281,9 @@ export function Assistant() {
 
   async function send(text: string, slotPatch?: Record<string, unknown>) {
     const question = text.trim()
-    if (!question || busy) return
+    // No routeId means the URL has not normalised yet (a millisecond on mount);
+    // dropping the send beats a turn the store could never file anywhere.
+    if (!question || busy || !routeId) return
 
     const replyId = `a${++seq.current}`
     const nearMe = parseNearMe(question)
@@ -186,11 +321,12 @@ export function Assistant() {
     ]
 
     try {
-      for await (const chunk of api.chat(wire, { sessionId: sessionId.current, slotPatch })) {
-        const { token, trips, citations, parsed, state, quickReplies, done } = chunk
+      for await (const chunk of api.chat(wire, { sessionId: routeId, slotPatch })) {
+        const { token, trips, citations, parsed, state, quickReplies, provider, model, done } = chunk
         if (token) patch(replyId, (message) => ({ ...message, content: message.content + token }))
         if (trips) patch(replyId, (message) => ({ ...message, trips }))
         if (citations) patch(replyId, (message) => ({ ...message, citations }))
+        if (provider) patch(replyId, (message) => ({ ...message, provider, model }))
         if (state) patch(replyId, (message) => ({ ...message, state }))
         if (quickReplies) patch(replyId, (message) => ({ ...message, quickReplies }))
         if (parsed) {
@@ -207,6 +343,9 @@ export function Assistant() {
     } finally {
       patch(replyId, (message) => ({ ...message, streaming: false }))
       setBusy(false)
+      // The first turn also titles the conversation server-side, and every turn
+      // bumps its recency — refresh the drawer's list to match.
+      void api.chatSessions().then(setSessions)
     }
   }
 
@@ -237,6 +376,9 @@ export function Assistant() {
       ? undefined
       : newestReply.id
 
+  // What the plan bar's pills show: the plan as the newest turn left it.
+  const planState = reversed.find((m) => m.state)?.state
+
   const live = health !== null && health.status !== 'offline'
 
   return (
@@ -247,18 +389,51 @@ export function Assistant() {
         className="flex min-h-[calc(100dvh-4rem)] flex-col border-b md:min-h-screen lg:min-h-0 lg:border-b-0 lg:border-r"
       >
         <header className="flex flex-wrap items-center justify-between gap-3 px-5 pb-3 pt-6 md:px-8">
-          <div>
-            <p className="text-sm font-semibold">TravelIQ assistant</p>
-            <p className="text-xs text-muted-foreground">
-              Grounded in the trip catalogue and the booking conditions
-            </p>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setHistoryOpen(true)}
+              aria-label="Chat history"
+              title="Chat history"
+              className="cursor-pointer rounded-lg border p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <History className="size-4" aria-hidden="true" />
+            </button>
+            <div>
+              <p className="text-sm font-semibold">TravelIQ assistant</p>
+              <p className="text-xs text-muted-foreground">
+                Grounded in the trip catalogue and the booking conditions
+              </p>
+            </div>
           </div>
-          <ModelPill
-            provider={health?.chatProvider ?? null}
-            live={live}
-            loading={health === null}
-          />
+          <div className="flex items-center gap-2">
+            {messages.length > 0 && (
+              <button
+                type="button"
+                onClick={startNewChat}
+                disabled={busy}
+                className="cursor-pointer rounded-full border px-3 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-50"
+              >
+                New chat
+              </button>
+            )}
+            <ModelPill
+              provider={health?.chatProvider ?? null}
+              live={live}
+              loading={health === null}
+            />
+          </div>
         </header>
+
+        {/* The plan at a glance — Where · When · Who · Budget. Every Update is an
+            ordinary turn with an exact slot patch, the same door the chips use. */}
+        <div className="px-5 pb-3 md:px-8">
+          <PlanBar
+            state={planState}
+            busy={busy}
+            onApply={(sentence, slotPatch) => void send(sentence, slotPatch)}
+          />
+        </div>
 
         <div
           onScroll={(event) => {
@@ -332,6 +507,19 @@ export function Assistant() {
           loading={rails === null}
         />
       </aside>
+
+      <ChatHistoryPanel
+        open={historyOpen}
+        sessions={sessions}
+        activeId={routeId ?? ''}
+        busy={busy}
+        onClose={() => setHistoryOpen(false)}
+        onSelect={(id) => void openChat(id)}
+        onNew={startNewChat}
+        onPin={(id, pinned) => void api.updateChatSession(id, { pinned }).then(applySessions)}
+        onRename={(id, title) => void api.updateChatSession(id, { title }).then(applySessions)}
+        onDelete={(id) => void handleDeleteChat(id)}
+      />
     </div>
   )
 }

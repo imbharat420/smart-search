@@ -1,7 +1,9 @@
-// Identifies one conversation so the backend can key its trip-plan state on it.
-// sessionStorage, not the localStorage that originStore.ts uses: a device location
-// genuinely is durable, whereas a half-answered travel plan silently resumed a week
-// later would be worse than starting fresh.
+// Identifies one conversation so the backend can key its trip-plan state and its
+// stored transcript on it (backend/app/sessions.py). localStorage rather than the
+// sessionStorage this started with: the conversation is now persisted server-side
+// and restored on load, so the id has to outlive the tab or the stored thread
+// would be orphaned on every restart. Resuming is explicit on screen — the
+// restored messages are visible, and "New chat" (resetSession) starts fresh.
 
 const KEY = 'travelIQ.sessionId'
 
@@ -28,7 +30,7 @@ function mintId(): string {
 
 export function getSessionId(): string {
   try {
-    const existing = sessionStorage.getItem(KEY)
+    const existing = localStorage.getItem(KEY)
     if (existing) {
       // Mirror it in memory too: if storage starts throwing later in the sitting
       // (quota, or an embedding page revoking access) we carry on with this same id
@@ -37,7 +39,7 @@ export function getSessionId(): string {
       return inMemoryId
     }
     const minted = mintId()
-    sessionStorage.setItem(KEY, minted)
+    localStorage.setItem(KEY, minted)
     inMemoryId = minted
     return minted
   } catch {
@@ -46,10 +48,23 @@ export function getSessionId(): string {
   }
 }
 
+// Switch this browser to an existing conversation — the chat drawer picking a
+// thread from the list. The id was one of ours to begin with, so length is the
+// only thing worth guarding.
+export function setSessionId(id: string): void {
+  const cleaned = id.slice(0, MAX_LENGTH)
+  inMemoryId = cleaned
+  try {
+    localStorage.setItem(KEY, cleaned)
+  } catch {
+    // The in-memory mirror above keeps the sitting coherent, same as getSessionId.
+  }
+}
+
 export function resetSession(): void {
   inMemoryId = null
   try {
-    sessionStorage.removeItem(KEY)
+    localStorage.removeItem(KEY)
   } catch {
     // Nothing was persisted anyway — the in-memory id above is already cleared.
   }

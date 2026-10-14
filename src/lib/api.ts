@@ -10,7 +10,9 @@ import type {
   AdminConfig,
   AnalyticsOverview,
   ChatChunk,
+  ChatHistoryResponse,
   ChatMessage,
+  ChatSessionMeta,
   DataSource,
   Destination,
   Guide,
@@ -249,6 +251,25 @@ async function openChatStream(
   }
 }
 
+// A product shown as a Discover pin: it sits at its destination's centre and
+// its location string carries the country, mirroring how the backend answers
+// country and location searches over the whole catalogue.
+function tripAsPlace(t: Trip): Place {
+  return {
+    id: t.id,
+    name: t.title,
+    type: 'trip',
+    category: 'trips',
+    location: `${t.destination.name}, ${t.destination.country}`,
+    rating: t.rating,
+    distanceMiles: 0,
+    price: `From ${money(t.priceFrom)}`,
+    lat: t.destination.lat,
+    lng: t.destination.lng,
+    imageUrl: t.imageUrl,
+  }
+}
+
 export const api = {
   search(body: {
     query: string
@@ -301,7 +322,7 @@ export const api = {
     if (params?.category) query.set('category', params.category)
     const suffix = query.toString() ? `?${query}` : ''
     return withFallback(`/places${suffix}`, undefined, () =>
-      PLACES.filter((p) => {
+      [...PLACES, ...TRIPS.map(tripAsPlace)].filter((p) => {
         if (params?.category && p.category !== params.category) return false
         if (!params?.q) return true
         const needle = params.q.toLowerCase()
@@ -313,6 +334,65 @@ export const api = {
       }),
       isArrayOf,
     )
+  },
+
+  // The stored transcript for this session, so a reload resumes the conversation.
+  // Degrades to an empty thread rather than throwing, but deliberately does NOT
+  // set the demo-data pill: an unreachable backend already flips it on the next
+  // read, and "no stored history" is also the honest answer for a fresh session.
+  async chatHistory(sessionId: string): Promise<ChatHistoryResponse> {
+    try {
+      const data = await request<ChatHistoryResponse>(
+        `/chat/history?sessionId=${encodeURIComponent(sessionId)}`,
+      )
+      if (!hasArrays(data, ['messages'])) throw new ContractError('/chat/history')
+      return data
+    } catch (err) {
+      if (err instanceof ContractError) warnSkew('/chat/history')
+      return { sessionId, messages: [] }
+    }
+  },
+
+  // The chat drawer's list. All three degrade to "no list" rather than throwing:
+  // offline, the drawer just shows the current conversation as the only one.
+  async chatSessions(): Promise<ChatSessionMeta[]> {
+    try {
+      const data = await request<{ sessions: ChatSessionMeta[] }>('/chat/sessions')
+      if (!hasArrays(data, ['sessions'])) throw new ContractError('/chat/sessions')
+      return data.sessions
+    } catch (err) {
+      if (err instanceof ContractError) warnSkew('/chat/sessions')
+      return []
+    }
+  },
+
+  /** Rename or pin one chat; returns the refreshed list, or null when it failed. */
+  async updateChatSession(
+    sessionId: string,
+    patch: { title?: string; pinned?: boolean },
+  ): Promise<ChatSessionMeta[] | null> {
+    try {
+      const data = await request<{ sessions: ChatSessionMeta[] }>(
+        `/chat/sessions/${encodeURIComponent(sessionId)}`,
+        jsonBody('PATCH', patch),
+      )
+      return data.sessions ?? []
+    } catch {
+      return null
+    }
+  },
+
+  /** Delete one chat (plan and transcript); returns the refreshed list, or null. */
+  async deleteChatSession(sessionId: string): Promise<ChatSessionMeta[] | null> {
+    try {
+      const data = await request<{ sessions: ChatSessionMeta[] }>(
+        `/chat/sessions/${encodeURIComponent(sessionId)}`,
+        { method: 'DELETE' },
+      )
+      return data.sessions ?? []
+    } catch {
+      return null
+    }
   },
 
   async *chat(messages: ChatMessage[], opts: ChatTurnOptions = {}): AsyncGenerator<ChatChunk> {

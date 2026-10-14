@@ -5,8 +5,9 @@ import { SiteFooter } from './SiteFooter'
 
 export function AppShell() {
   const { pathname } = useLocation()
-  // The assistant is a full-height split view; a footer under it would fight the composer.
-  const showFooter = pathname !== '/assistant'
+  // The assistant is a full-height split view; a footer under it would fight the
+  // composer. Prefix match because each conversation lives at /assistant/<id>.
+  const showFooter = !pathname.startsWith('/assistant')
 
   return (
     <div className="flex min-h-screen bg-background">

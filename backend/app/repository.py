@@ -172,6 +172,26 @@ def _distance_miles(lat1: float, lng1: float, lat2: float, lng2: float) -> float
     return round(2 * _EARTH_RADIUS_MILES * asin(sqrt(a)), 1)
 
 
+def _trip_as_place(trip: Trip) -> Place:
+    """A product shown on the Discover map. It sits at its destination's centre
+    (distance 0 by construction, so radius never hides it), and its location
+    string carries the country so a country search reaches the whole catalogue."""
+    destination = trip.destination
+    return Place(
+        id=trip.id,
+        name=trip.title,
+        type="trip",
+        category="trips",
+        location=f"{destination.name}, {destination.country}",
+        rating=trip.rating,
+        distanceMiles=0.0,
+        price=f"From £{trip.priceFrom:,.0f}",
+        lat=destination.lat,
+        lng=destination.lng,
+        imageUrl=trip.imageUrl,
+    )
+
+
 def _rank_suggestions(
     prefix: str, history: list[str], vocabulary: list[str], limit: int
 ) -> list[str]:
@@ -427,6 +447,24 @@ def _place_out(row: models.Poi, distance: float) -> Place:
     )
 
 
+def _trip_place_out(row: models.Trip) -> Place:
+    """A product on the Discover map, pinned at its destination's centre —
+    trips carry no lat/lng of their own, the destination is their location."""
+    return Place(
+        id=str(row.id),
+        name=row.title,
+        type="trip",
+        category="trips",
+        location=f"{row.destination.name}, {row.destination.country}",
+        rating=float(row.rating),
+        distanceMiles=0.0,
+        price=f"From £{row.price_from:,.0f}",
+        lat=float(row.destination.lat),
+        lng=float(row.destination.lng),
+        imageUrl=row.image_url,
+    )
+
+
 def _synonym_out(row: models.Synonym) -> Synonym:
     return Synonym(
         id=str(row.id),
@@ -639,9 +677,12 @@ class MemoryRepo:
         self, q: str = "", category: str = "", radius_miles: float = 25.0
     ) -> list[Place]:
         needle = q.lower().strip()
+        candidates = list(self._places)
+        if not category or category == "trips":
+            candidates.extend(_trip_as_place(t) for t in self._trips)
         found = [
             p
-            for p in self._places
+            for p in candidates
             if (not category or p.category == category)
             and p.distanceMiles <= radius_miles
             and (
@@ -928,36 +969,61 @@ class PostgresRepo:
         Real geo-search — 'within 12 miles of where I am standing' — wants
         PostGIS and a `geography(Point)` column; that is the production path, and
         the POC does the trigonometry in Python over a few dozen rows instead."""
-        stmt = select(models.Poi, models.Destination).outerjoin(
-            models.Destination, models.Poi.destination_id == models.Destination.id
-        )
-        if category:
-            stmt = stmt.where(models.Poi.category == category)
-        if q:
-            like = f"%{q}%"
-            stmt = stmt.where(
-                models.Poi.name.ilike(like)
-                | models.Poi.location.ilike(like)
-                | models.Poi.kind.ilike(like)
-            )
-
-        async with db.session() as s:
-            rows = (await s.execute(stmt)).all()
-
+        like = f"%{q}%" if q else None
         found: list[Place] = []
-        for poi, destination in rows:
-            distance = (
-                _distance_miles(
-                    float(destination.lat),
-                    float(destination.lng),
-                    float(poi.lat),
-                    float(poi.lng),
-                )
-                if destination is not None
-                else 0.0
+
+        if category != "trips":
+            stmt = select(models.Poi, models.Destination).outerjoin(
+                models.Destination, models.Poi.destination_id == models.Destination.id
             )
-            if distance <= radius_miles:
-                found.append(_place_out(poi, distance))
+            if category:
+                stmt = stmt.where(models.Poi.category == category)
+            if like:
+                # The joined destination answers country searches — POI location
+                # strings name districts and cities, not countries.
+                stmt = stmt.where(
+                    models.Poi.name.ilike(like)
+                    | models.Poi.location.ilike(like)
+                    | models.Poi.kind.ilike(like)
+                    | models.Destination.name.ilike(like)
+                    | models.Destination.country.ilike(like)
+                )
+
+            async with db.session() as s:
+                rows = (await s.execute(stmt)).all()
+
+            for poi, destination in rows:
+                distance = (
+                    _distance_miles(
+                        float(destination.lat),
+                        float(destination.lng),
+                        float(poi.lat),
+                        float(poi.lng),
+                    )
+                    if destination is not None
+                    else 0.0
+                )
+                if distance <= radius_miles:
+                    found.append(_place_out(poi, distance))
+
+        if not category or category == "trips":
+            # Every product in the catalogue doubles as a pin at its
+            # destination's centre, so country and location searches reach the
+            # trips as well as the POIs.
+            trip_stmt = select(models.Trip).join(
+                models.Destination, models.Trip.destination_id == models.Destination.id
+            )
+            if like:
+                trip_stmt = trip_stmt.where(
+                    models.Trip.title.ilike(like)
+                    | models.Destination.name.ilike(like)
+                    | models.Destination.country.ilike(like)
+                    | models.Destination.region.ilike(like)
+                )
+            async with db.session() as s:
+                trips = (await s.scalars(trip_stmt)).unique().all()
+            found.extend(_trip_place_out(t) for t in trips)
+
         return sorted(found, key=lambda p: p.distanceMiles)
 
     # -- Analytics ---------------------------------------------------------

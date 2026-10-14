@@ -22,6 +22,7 @@ import { RadiusControl } from '../components/discover/RadiusControl'
 const MapPanel = lazy(() => import('../components/discover/MapPanel'))
 
 const RAILS: { category: Place['category']; title: string; nothing: string }[] = [
+  { category: 'trips', title: 'Trips', nothing: 'No trips from the catalogue are pinned' },
   {
     category: 'things-to-do',
     title: 'Things To Do',

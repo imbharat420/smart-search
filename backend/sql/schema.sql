@@ -382,12 +382,16 @@ CREATE TABLE IF NOT EXISTS search_events (
 -- for one session id and merges it in Python.
 CREATE TABLE IF NOT EXISTS assistant_sessions (
     id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    -- Minted by the browser (crypto.randomUUID, kept in sessionStorage) and never
+    -- Minted by the browser (crypto.randomUUID, kept in localStorage) and never
     -- authenticated. UNIQUE because every chat turn upserts on it.
     session_id varchar(64) NOT NULL UNIQUE,
     state      jsonb NOT NULL DEFAULT '{}',   -- one TripPlanState, unset slots omitted
     -- Lifted out of the blob so "how long do conversations run?" is one query.
     turn_count integer NOT NULL DEFAULT 0,
+    -- The chat list's label: set once from the first user message, renameable via
+    -- PATCH /chat/sessions/{id}. Null means the conversation never completed a turn.
+    title      varchar(120),
+    pinned     boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now(),
     -- Trigger-maintained (see the bottom of this file). A sweeper deleting plans
     -- older than a few days would read this column and want an index on it;
@@ -395,6 +399,35 @@ CREATE TABLE IF NOT EXISTS assistant_sessions (
     updated_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT ck_assistant_sessions_turn_count CHECK (turn_count >= 0)
 );
+
+-- One row per chat message, so a conversation survives a reload and a returning
+-- traveller resumes with full context. Kept apart from assistant_sessions (the
+-- plan upserts; the transcript appends) and joined to it by session_id without a
+-- foreign key: a stateless turn writes messages before any plan row exists.
+-- `payload` carries what streamed alongside the reply (citations, grounded trip
+-- ids, quick-reply chips, which provider/model answered) as one jsonb blob; trips
+-- are stored as ids and re-read from the catalogue on load so restored cards show
+-- current prices.
+CREATE TABLE IF NOT EXISTS assistant_messages (
+    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id varchar(64) NOT NULL,
+    -- Explicit per-conversation ordering: the two rows one turn writes share a
+    -- created_at down to the clock's resolution, and "user then assistant" must
+    -- never depend on a timestamp tie-break.
+    seq        integer NOT NULL,
+    role       varchar(16) NOT NULL,
+    content    text NOT NULL,
+    payload    jsonb NOT NULL DEFAULT '{}',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_assistant_messages_role CHECK (role IN ('user', 'assistant')),
+    CONSTRAINT ck_assistant_messages_seq CHECK (seq >= 0)
+);
+
+-- The one read path is "this conversation, in order" - one composite index serves
+-- it and the max(seq) lookup the writer does.
+CREATE INDEX IF NOT EXISTS ix_assistant_messages_session_seq
+    ON assistant_messages (session_id, seq);
 
 
 -- ========================================================== commerce ========

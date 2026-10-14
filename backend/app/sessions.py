@@ -21,15 +21,16 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import Any, Optional, Protocol
 
 from pydantic import ValidationError
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from . import db, models
 from .config import settings
-from .schemas import TripPlanState
+from .schemas import ChatSessionMeta, StoredMessage, TripPlanState
 
 log = logging.getLogger("traveliq.sessions")
 
@@ -42,6 +43,18 @@ MAX_SESSIONS = 500
 # assistant_sessions.session_id is varchar(64) and the client mints a uuid4 (36
 # characters), so anything longer is a client that invented its own scheme.
 SESSION_ID_MAX = 64
+
+# The transcript a returning traveller gets back, newest-first truncated: enough
+# to re-read any real conversation, small enough that one hostile session cannot
+# make /chat/history a memory problem. The full row set stays in Postgres; this
+# caps what one load returns (and what the memory store holds per session).
+MAX_TRANSCRIPT = 200
+
+# assistant_sessions.title is varchar(120); GET /chat/sessions returns at most
+# this many rows, newest first — beyond it the list stops being a list anyone
+# scrolls and starts being an export.
+TITLE_MAX = 120
+MAX_LISTED = 100
 
 
 def _usable(session_id: str) -> bool:
@@ -92,6 +105,20 @@ class SessionStore(Protocol):
     async def load(self, session_id: str) -> TripPlanState: ...
     async def save(self, session_id: str, state: TripPlanState) -> None: ...
     async def forget(self, session_id: str) -> None: ...
+    # The transcript, same never-raise contract as the plan: a failed append costs
+    # one turn of history, a failed history read costs a fresh-looking thread —
+    # never the answer itself.
+    async def append_messages(self, session_id: str, entries: list[StoredMessage]) -> None: ...
+    async def history(self, session_id: str) -> list[StoredMessage]: ...
+    # The chat list: conversations that have a transcript, pinned first then most
+    # recent. set_meta returns False for an unknown session so the router can 404;
+    # ensure_title only ever fills an empty label, so a rename is never overwritten
+    # by the next turn.
+    async def sessions_list(self) -> list[ChatSessionMeta]: ...
+    async def set_meta(
+        self, session_id: str, *, title: Optional[str] = None, pinned: Optional[bool] = None
+    ) -> bool: ...
+    async def ensure_title(self, session_id: str, title: str) -> None: ...
 
 
 # --- In-memory ------------------------------------------------------------
@@ -108,6 +135,14 @@ class MemorySessionStore:
 
     def __init__(self) -> None:
         self._plans: "OrderedDict[str, TripPlanState]" = OrderedDict()
+        # Transcripts, bounded the same two ways the Postgres store is bounded by
+        # MAX_TRANSCRIPT: at most MAX_SESSIONS conversations, each keeping only
+        # its newest MAX_TRANSCRIPT messages.
+        self._messages: "OrderedDict[str, list[StoredMessage]]" = OrderedDict()
+        # Chat-list metadata (title, pinned, last activity), keyed and evicted
+        # alongside _messages — a conversation with no transcript has no row in
+        # the list, so the two must live and die together.
+        self._meta: dict[str, dict[str, Any]] = {}
 
     async def load(self, session_id: str) -> TripPlanState:
         held = self._plans.get(session_id)
@@ -135,6 +170,66 @@ class MemorySessionStore:
 
     async def forget(self, session_id: str) -> None:
         self._plans.pop(session_id, None)
+        self._messages.pop(session_id, None)
+        self._meta.pop(session_id, None)
+
+    async def append_messages(self, session_id: str, entries: list[StoredMessage]) -> None:
+        if not _usable(session_id) or not entries:
+            return
+        held = self._messages.setdefault(session_id, [])
+        # Copies in, copies out, like the plans above: the caller keeps mutating
+        # its payload dicts after the turn and the record must not move with it.
+        held.extend(entry.model_copy(deep=True) for entry in entries)
+        del held[:-MAX_TRANSCRIPT]
+        self._messages.move_to_end(session_id)
+        meta = self._meta.setdefault(session_id, {"title": None, "pinned": False})
+        meta["updated"] = datetime.now(timezone.utc)
+        while len(self._messages) > MAX_SESSIONS:
+            evicted, _ = self._messages.popitem(last=False)
+            self._meta.pop(evicted, None)
+
+    async def history(self, session_id: str) -> list[StoredMessage]:
+        held = self._messages.get(session_id)
+        if not held:
+            return []
+        self._messages.move_to_end(session_id)
+        return [entry.model_copy(deep=True) for entry in held]
+
+    async def sessions_list(self) -> list[ChatSessionMeta]:
+        rows = [
+            ChatSessionMeta(
+                sessionId=session_id,
+                title=meta.get("title"),
+                pinned=bool(meta.get("pinned")),
+                updatedAt=updated.isoformat() if (updated := meta.get("updated")) else None,
+                # Two rows per turn, so the pair count is the turn count.
+                turnCount=len(self._messages.get(session_id, [])) // 2,
+            )
+            for session_id, meta in self._meta.items()
+            if self._messages.get(session_id)
+        ]
+        # Pinned first, newest first within each group — two stable sorts, the
+        # tie-breaker applied first.
+        rows.sort(key=lambda r: r.updatedAt or "", reverse=True)
+        rows.sort(key=lambda r: not r.pinned)
+        return rows[:MAX_LISTED]
+
+    async def set_meta(
+        self, session_id: str, *, title: Optional[str] = None, pinned: Optional[bool] = None
+    ) -> bool:
+        meta = self._meta.get(session_id)
+        if meta is None:
+            return False
+        if title is not None:
+            meta["title"] = title.strip()[:TITLE_MAX]
+        if pinned is not None:
+            meta["pinned"] = pinned
+        return True
+
+    async def ensure_title(self, session_id: str, title: str) -> None:
+        meta = self._meta.get(session_id)
+        if meta is not None and not meta.get("title"):
+            meta["title"] = title.strip()[:TITLE_MAX] or None
 
 
 # --- Postgres -------------------------------------------------------------
@@ -216,12 +311,170 @@ class PostgresSessionStore:
                         models.AssistantSession.session_id == session_id
                     )
                 )
+                await s.execute(
+                    delete(models.AssistantMessage).where(
+                        models.AssistantMessage.session_id == session_id
+                    )
+                )
         except Exception as exc:  # noqa: BLE001 — "start again" must succeed for the traveller either way
             log.warning(
                 "could not forget session %s (%s); the stale plan is still on record",
                 session_id,
                 exc,
             )
+
+    async def append_messages(self, session_id: str, entries: list[StoredMessage]) -> None:
+        if not _usable(session_id) or not entries:
+            return
+        try:
+            async with db.session() as s:
+                # max(seq)+1 in the same transaction that inserts. Two overlapping
+                # turns of one session could mint the same seq — there is no unique
+                # constraint on purpose, because a duplicated ordinal misorders one
+                # pair of messages at worst, and created_at still tie-breaks reads.
+                next_seq = await s.scalar(
+                    select(func.coalesce(func.max(models.AssistantMessage.seq), 0) + 1).where(
+                        models.AssistantMessage.session_id == session_id
+                    )
+                )
+                s.add_all(
+                    models.AssistantMessage(
+                        session_id=session_id,
+                        seq=(next_seq or 1) + offset,
+                        role=entry.role,
+                        content=entry.content,
+                        payload=entry.payload,
+                    )
+                    for offset, entry in enumerate(entries)
+                )
+        except Exception as exc:  # noqa: BLE001 — a dropped append costs one turn of history, not the turn
+            log.warning(
+                "could not append %d message(s) for session %s (%s); the transcript skips this turn",
+                len(entries),
+                session_id,
+                exc,
+            )
+
+    async def history(self, session_id: str) -> list[StoredMessage]:
+        if not _usable(session_id):
+            return []
+        try:
+            async with db.session() as s:
+                rows = (
+                    await s.execute(
+                        select(
+                            models.AssistantMessage.role,
+                            models.AssistantMessage.content,
+                            models.AssistantMessage.payload,
+                        )
+                        .where(models.AssistantMessage.session_id == session_id)
+                        # Newest first plus limit keeps the *tail* of a long
+                        # conversation — the end is what the traveller resumes from.
+                        .order_by(
+                            models.AssistantMessage.seq.desc(),
+                            models.AssistantMessage.created_at.desc(),
+                        )
+                        .limit(MAX_TRANSCRIPT)
+                    )
+                ).all()
+        except Exception as exc:  # noqa: BLE001 — an unreachable database looks like a fresh thread, never a 500
+            log.warning(
+                "could not load history for session %s (%s); the thread starts fresh on screen",
+                session_id,
+                exc,
+            )
+            return []
+        return [
+            StoredMessage(role=role, content=content, payload=payload or {})
+            for role, content, payload in reversed(rows)
+        ]
+
+    async def sessions_list(self) -> list[ChatSessionMeta]:
+        try:
+            async with db.session() as s:
+                rows = (
+                    await s.execute(
+                        select(
+                            models.AssistantSession.session_id,
+                            models.AssistantSession.title,
+                            models.AssistantSession.pinned,
+                            models.AssistantSession.updated_at,
+                            models.AssistantSession.turn_count,
+                        )
+                        # Only conversations with a transcript: a plan row alone
+                        # (a turn that saved state before this table existed, or a
+                        # failed append) would list as an empty, untitled chat.
+                        .where(
+                            exists().where(
+                                models.AssistantMessage.session_id
+                                == models.AssistantSession.session_id
+                            )
+                        )
+                        .order_by(
+                            models.AssistantSession.pinned.desc(),
+                            models.AssistantSession.updated_at.desc(),
+                        )
+                        .limit(MAX_LISTED)
+                    )
+                ).all()
+        except Exception as exc:  # noqa: BLE001 — no list is a closed drawer, not a broken screen
+            log.warning("could not list sessions (%s); the chat list shows empty", exc)
+            return []
+        return [
+            ChatSessionMeta(
+                sessionId=session_id,
+                title=title,
+                pinned=bool(pinned),
+                updatedAt=updated_at.isoformat() if updated_at else None,
+                turnCount=turn_count or 0,
+            )
+            for session_id, title, pinned, updated_at, turn_count in rows
+        ]
+
+    async def set_meta(
+        self, session_id: str, *, title: Optional[str] = None, pinned: Optional[bool] = None
+    ) -> bool:
+        if not _usable(session_id):
+            return False
+        values: dict[str, Any] = {}
+        if title is not None:
+            values["title"] = title.strip()[:TITLE_MAX]
+        if pinned is not None:
+            values["pinned"] = pinned
+        if not values:
+            return True
+        try:
+            async with db.session() as s:
+                result = await s.execute(
+                    update(models.AssistantSession)
+                    .where(models.AssistantSession.session_id == session_id)
+                    .values(**values)
+                )
+                return bool(result.rowcount)
+        except Exception as exc:  # noqa: BLE001 — a lost rename/pin is retryable by its owner
+            log.warning("could not update metadata for session %s (%s)", session_id, exc)
+            return False
+
+    async def ensure_title(self, session_id: str, title: str) -> None:
+        if not _usable(session_id):
+            return
+        cleaned = title.strip()[:TITLE_MAX]
+        if not cleaned:
+            return
+        try:
+            async with db.session() as s:
+                # Fills the label exactly once: the WHERE keeps a traveller's
+                # rename from being overwritten by every subsequent turn.
+                await s.execute(
+                    update(models.AssistantSession)
+                    .where(
+                        models.AssistantSession.session_id == session_id,
+                        models.AssistantSession.title.is_(None),
+                    )
+                    .values(title=cleaned)
+                )
+        except Exception as exc:  # noqa: BLE001 — an unlabelled chat still lists, by its date
+            log.warning("could not title session %s (%s)", session_id, exc)
 
 
 # --- Selection ------------------------------------------------------------

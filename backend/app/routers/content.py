@@ -12,7 +12,7 @@ from ..schemas import Destination, Guide, Place, TripDetail
 
 router = APIRouter()
 
-_PLACE_CATEGORIES = {"things-to-do", "restaurants", "stays"}
+_PLACE_CATEGORIES = {"things-to-do", "restaurants", "stays", "trips"}
 
 
 @router.get("/destinations", response_model=list[Destination])
@@ -46,9 +46,11 @@ async def places(
     radius: float = Query(25.0, ge=1.0, le=500.0, description="miles from the map centre"),
     repo: Repo = Depends(get_repo),
 ) -> list[Place]:
-    """The Discover screen's list. `radius` is measured against each place's
-    precomputed distance from the destination centre — real geo-search against
-    lat/lng would need PostGIS, which is on the roadmap, not in this POC."""
+    """The Discover screen's list: points of interest plus every product in the
+    catalogue (category 'trips'), each pinned at its destination's lat/lng so
+    `q` matches by name, location or country. `radius` is measured against each
+    place's precomputed distance from the destination centre — real geo-search
+    against lat/lng would need PostGIS, which is on the roadmap, not in this POC."""
     if category and category not in _PLACE_CATEGORIES:
         raise HTTPException(
             status_code=400,

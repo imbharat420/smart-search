@@ -104,6 +104,21 @@ async def create_all() -> bool:
 
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # create_all adds missing *tables*, never missing *columns* — so the few
+    # columns added to a table after its first deploy are ensured here by hand,
+    # idempotently. A real migration tool is overkill while this list is short;
+    # keep it in step with sql/schema.sql like everything else in models.py.
+    try:
+        async with eng.begin() as conn:
+            for ddl in (
+                "alter table assistant_sessions add column if not exists title varchar(120)",
+                "alter table assistant_sessions add column if not exists pinned boolean not null default false",
+            ):
+                await conn.exec_driver_sql(ddl)
+    except Exception as exc:  # noqa: BLE001 — an old schema still serves everything but the chat list
+        log.warning("could not ensure assistant_sessions columns (%s)", exc)
+
     log.info("schema ensured for %d tables", len(Base.metadata.tables))
     return True
 

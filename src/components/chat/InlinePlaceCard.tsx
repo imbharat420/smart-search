@@ -9,6 +9,7 @@ const CATEGORY_LABEL: Record<Place['category'], string> = {
   'things-to-do': 'Thing to do',
   restaurants: 'Restaurant',
   stays: 'Stay',
+  trips: 'Trip',
 }
 
 export function InlinePlaceCard({ place }: InlinePlaceCardProps) {
