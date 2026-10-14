@@ -328,20 +328,31 @@ export const api = {
     const decoder = new TextDecoder()
     let buffer = ''
 
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
 
-      // Server-Sent Events are separated by a blank line.
-      const events = buffer.split('\n\n')
-      buffer = events.pop() ?? ''
-      for (const evt of events) {
-        const line = evt.trim()
-        if (!line.startsWith('data:')) continue
-        const json = line.slice('data:'.length).trim()
-        if (json) yield JSON.parse(json) as ChatChunk
+        // Server-Sent Events are separated by a blank line.
+        const events = buffer.split('\n\n')
+        buffer = events.pop() ?? ''
+        for (const evt of events) {
+          const line = evt.trim()
+          if (!line.startsWith('data:')) continue
+          const json = line.slice('data:'.length).trim()
+          if (!json) continue
+          try {
+            yield JSON.parse(json) as ChatChunk
+          } catch {
+            // One malformed line shouldn't kill an otherwise-working stream.
+          }
+        }
       }
+    } finally {
+      // Releases the connection whether the stream finished, the caller broke
+      // out early, or an error propagated — otherwise the fetch keeps running.
+      void reader.cancel()
     }
   },
 

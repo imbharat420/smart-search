@@ -139,11 +139,16 @@ export function Assistant() {
     }))
   }
 
-  function handleShareLocation(replyId: string, shared: Coords, intent: NearMeIntent) {
+  async function handleShareLocation(replyId: string, shared: Coords, intent: NearMeIntent) {
     setOrigin(shared)
     setStoredOrigin(shared)
     patch(replyId, (message) => ({ ...message, streaming: true }))
-    void answerNearby(replyId, shared, intent.radiusKm, intent.radiusMiles)
+    setBusy(true)
+    try {
+      await answerNearby(replyId, shared, intent.radiusKm, intent.radiusMiles)
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function send(text: string, slotPatch?: Record<string, unknown>) {
@@ -291,7 +296,7 @@ export function Assistant() {
                     message={message}
                     onShareLocation={
                       message.needsLocation
-                        ? (shared) => handleShareLocation(message.id, shared, message.needsLocation!)
+                        ? (shared) => void handleShareLocation(message.id, shared, message.needsLocation!)
                         : undefined
                     }
                     onQuickReply={
