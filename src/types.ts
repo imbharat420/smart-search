@@ -141,8 +141,8 @@ export interface Guide {
 export interface Place {
   id: string
   name: string
-  type: string // 'museum' | 'restaurant' | 'hotel' | 'landmark'
-  category: 'things-to-do' | 'restaurants' | 'stays'
+  type: string // 'museum' | 'restaurant' | 'hotel' | 'landmark' | 'trip'
+  category: 'things-to-do' | 'restaurants' | 'stays' | 'trips'
   location: string
   rating?: number
   distanceMiles: number
@@ -209,6 +209,11 @@ export interface ChatChunk {
   parsed?: ParsedQuery
   state?: TripPlanState
   quickReplies?: QuickReplyGroup
+  // Which provider/model answered this turn. Per-turn, not per-session: the
+  // backend's fallback chain means consecutive replies can come from different
+  // models, which is exactly what the pill on the bubble is there to show.
+  provider?: string
+  model?: string
   done?: boolean
 }
 
@@ -231,11 +236,43 @@ export interface UiMessage {
   // assistant knew at the time instead of rewriting history.
   state?: TripPlanState
   quickReplies?: QuickReplyGroup
+  // Which of the multi-provider chain answered this reply (absent on user
+  // messages, offline turns, and turns older than this field).
+  provider?: string
+  model?: string
   // "near me" handling (src/lib/nearMe.ts) is a client-side shortcut around the
   // place index, not part of the streamed trip-chat contract — set at most one
   // of the two below at a time.
   places?: Place[]
   needsLocation?: { radiusKm: number; radiusMiles: number }
+}
+
+/** One restored message from GET /chat/history — the persisted subset of UiMessage. */
+export interface ChatHistoryMessage {
+  role: 'user' | 'assistant'
+  content: string
+  trips?: Trip[]
+  citations?: Citation[]
+  quickReplies?: QuickReplyGroup
+  parsed?: ParsedQuery
+  provider?: string
+  model?: string
+}
+
+/** GET /chat/history response: the transcript plus the plan as the last turn left it. */
+export interface ChatHistoryResponse {
+  sessionId: string
+  messages: ChatHistoryMessage[]
+  state?: TripPlanState
+}
+
+/** One row of the chat list (GET /chat/sessions): label, sort keys, actions state. */
+export interface ChatSessionMeta {
+  sessionId: string
+  title?: string
+  pinned?: boolean
+  updatedAt?: string
+  turnCount?: number
 }
 
 // ---- admin + analytics ----

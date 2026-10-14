@@ -32,7 +32,11 @@ export default function App() {
             <Route path="/inspiration" element={<Inspiration />} />
             <Route path="/discover" element={<Discover />} />
             <Route path="/trip/:slug" element={<TripDetail />} />
+            {/* Every conversation has its own URL. Bare /assistant immediately
+                normalises to /assistant/<id> (see Assistant.tsx), so a chat can be
+                reloaded, bookmarked or shared and land on the same stored thread. */}
             <Route path="/assistant" element={<Assistant />} />
+            <Route path="/assistant/:sessionId" element={<Assistant />} />
             <Route path="/admin" element={<Admin />} />
             <Route path="*" element={<NotFound />} />
           </Route>

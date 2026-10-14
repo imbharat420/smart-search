@@ -52,6 +52,7 @@ from .schemas import (
     ParsedQuery,
     Promotion,
     QuickReplyGroup,
+    StoredMessage,
     Synonym,
     Trip,
     TripPlanState,
@@ -296,6 +297,63 @@ async def _save_state(session_id: Optional[str], state: TripPlanState) -> None:
         await sessions.store().save(session_id, state)
 
 
+async def _save_transcript(
+    session_id: Optional[str],
+    *,
+    question: str,
+    reply: str,
+    trips: list[Trip],
+    citations: list[Citation],
+    quick_replies: Optional[QuickReplyGroup],
+    parsed: Optional[ParsedQuery],
+    served: dict[str, str],
+) -> None:
+    """The turn as the traveller saw it, into the session store: their question
+    and the reply, with everything the reply carried (trip cards as ids, the
+    citation list, the chips, which provider answered) in one payload blob.
+    Written once per turn next to _save_state, and like it, never raising — the
+    store already downgrades every failure to a warning."""
+    if not session_id or not question:
+        return
+    payload: dict[str, Any] = {}
+    if trips:
+        # Ids only: /chat/history re-reads the catalogue, so a reprice or a title
+        # edit shows current data instead of a copy frozen at chat time.
+        payload["tripIds"] = [t.id for t in trips]
+    if citations:
+        payload["citations"] = [c.model_dump() for c in citations]
+    if quick_replies:
+        payload["quickReplies"] = quick_replies.model_dump(exclude_none=True)
+    if parsed:
+        payload["parsed"] = parsed.model_dump(exclude_none=True)
+    if served.get("provider"):
+        payload["provider"] = served["provider"]
+        if served.get("model"):
+            payload["model"] = served["model"]
+    await sessions.store().append_messages(
+        session_id,
+        [
+            StoredMessage(role="user", content=question),
+            StoredMessage(role="assistant", content=reply, payload=payload),
+        ],
+    )
+    # First turn labels the chat with the traveller's own words — ensure_title
+    # only fills an empty label, so later turns and renames are never clobbered.
+    await sessions.store().ensure_title(session_id, _chat_title(question))
+
+
+def _chat_title(question: str) -> str:
+    """A list label from the opening question: one line, tidy length. Word-boundary
+    truncation because 'Northern lights trip for a fam…' reads worse than one word
+    fewer. The traveller can rename it; this is just a sensible default."""
+    one_line = " ".join(question.split())
+    if len(one_line) <= 60:
+        return one_line
+    cut = one_line[:60]
+    head, _, _ = cut.rpartition(" ")
+    return f"{head or cut}…"
+
+
 # --- Retrieval -------------------------------------------------------------
 
 def _region_pool(state: TripPlanState, trips: list[Trip]) -> list[Trip]:
@@ -469,6 +527,9 @@ async def stream_chat(
     reply_parts: list[str] = []
     grounded: list[Trip] = []
     state: Optional[TripPlanState] = None
+    # Filled by the on_provider callback below; hoisted so the transcript save at
+    # the end of the turn can record who answered even on the no-provider paths.
+    served: dict[str, str] = {}
 
     try:
         span = turn.child("nlq.parse", "parser", inputs={"text": last_user})
@@ -585,7 +646,6 @@ async def stream_chat(
                 role = m.role if m.role in ("user", "assistant") else "user"
                 oai_messages.append({"role": role, "content": m.content})
 
-            served: dict[str, str] = {}
             span = turn.child("llm.generate", "llm", inputs={"messages": oai_messages})
             try:
                 async for token in llm.stream_chat(
@@ -606,6 +666,9 @@ async def stream_chat(
                 )
                 async for chunk in _stream_words(note):
                     yield chunk
+                # Into the record too: a restored thread must read the way the
+                # turn actually went, outage note and all.
+                reply_parts.append(note)
             else:
                 span.end(outputs={"reply": "".join(reply_parts)}, **served)
                 metrics.observe("llm.generate", span.elapsed_ms)
@@ -620,6 +683,13 @@ async def stream_chat(
             )
             async for chunk in _stream_words(note):
                 yield chunk
+            reply_parts.append(note)
+
+        # After the tokens, so it names the provider that actually finished the
+        # reply — the chain can move providers mid-turn only between requests,
+        # never mid-stream.
+        if served.get("provider"):
+            yield ChatChunk(provider=served["provider"], model=served.get("model"))
 
         cites = _citations(grounded, policy)
         if cites:
@@ -628,6 +698,16 @@ async def stream_chat(
         # Last, and after the reply: a turn whose generation failed has still moved the
         # plan, and losing that would make the traveller repeat themselves.
         await _save_state(session_id, state)
+        await _save_transcript(
+            session_id,
+            question=last_user,
+            reply="".join(reply_parts),
+            trips=inline,
+            citations=cites,
+            quick_replies=question,
+            parsed=parsed,
+            served=served,
+        )
 
         yield ChatChunk(done=True)
     except GeneratorExit:

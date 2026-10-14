@@ -90,8 +90,8 @@ class Guide(BaseModel):
 class Place(BaseModel):
     id: str
     name: str
-    type: str  # 'museum' | 'restaurant' | 'hotel' | 'landmark'
-    category: Literal["things-to-do", "restaurants", "stays"]
+    type: str  # 'museum' | 'restaurant' | 'hotel' | 'landmark' | 'trip'
+    category: Literal["things-to-do", "restaurants", "stays", "trips"]
     location: str
     rating: Optional[float] = None
     distanceMiles: float
@@ -256,12 +256,67 @@ class ChatChunk(BaseModel):
     parsed: Optional[ParsedQuery] = None
     state: Optional[TripPlanState] = None
     quickReplies: Optional[QuickReplyGroup] = None
+    # Which provider/model actually answered this turn — the chain in llm.py means
+    # it varies turn to turn, so the pill next to the reply must not read /health.
+    provider: Optional[str] = None
+    model: Optional[str] = None
     done: Optional[bool] = None
 
 
 class Message(BaseModel):
     role: str  # 'user' | 'assistant'
     content: str = Field(max_length=8000)
+
+
+class StoredMessage(BaseModel):
+    """One transcript row as sessions.py stores and returns it: the text plus the
+    raw payload blob. The history endpoint is what turns the blob back into typed
+    fields (and trip ids back into trips) — the store itself never interprets it."""
+    role: str  # 'user' | 'assistant'
+    content: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatHistoryMessage(BaseModel):
+    """One restored message, shaped for the Assistant screen: the same extras a
+    live turn streams (ChatChunk), minus the ephemeral ones (state rides on the
+    response instead, and near-me places never reach the backend at all)."""
+    role: str  # 'user' | 'assistant'
+    content: str
+    trips: Optional[list[Trip]] = None
+    citations: Optional[list[Citation]] = None
+    quickReplies: Optional[QuickReplyGroup] = None
+    parsed: Optional[ParsedQuery] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
+class ChatHistoryResponse(BaseModel):
+    sessionId: str
+    messages: list[ChatHistoryMessage] = Field(default_factory=list)
+    # The plan as the last turn left it, or None for a conversation that never
+    # moved a slot — the UI hangs it on the newest reply so PlanSummary renders.
+    state: Optional[TripPlanState] = None
+
+
+class ChatSessionMeta(BaseModel):
+    """One row of the chat list: enough to label, sort and act on a conversation
+    without loading its transcript."""
+    sessionId: str
+    title: Optional[str] = None
+    pinned: bool = False
+    updatedAt: Optional[str] = None  # ISO 8601
+    turnCount: int = 0
+
+
+class ChatSessionList(BaseModel):
+    sessions: list[ChatSessionMeta] = Field(default_factory=list)
+
+
+class ChatSessionPatch(BaseModel):
+    """PATCH /chat/sessions/{id} body — send only what changes."""
+    title: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    pinned: Optional[bool] = None
 
 
 # ---- Admin ---------------------------------------------------------------

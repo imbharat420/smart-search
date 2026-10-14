@@ -113,6 +113,15 @@ export function ChatBubble({
           )}
         </div>
 
+        {/* Which provider answered — per reply, because the fallback chain means
+            consecutive turns can come from different models. */}
+        {message.provider && !streaming && (
+          <p className="-mt-1.5 px-1 text-[11px] text-muted-foreground/80">
+            Answered by {message.provider}
+            {message.model ? ` · ${message.model}` : ''}
+          </p>
+        )}
+
         {message.citations && message.citations.length > 0 && (
           <CitationPills citations={message.citations} onSelect={reveal} />
         )}

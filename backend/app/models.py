@@ -587,11 +587,56 @@ class AssistantSession(Base, TimestampMixin):
     session_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     state: Mapped[dict[str, Any]] = mapped_column(nullable=False, server_default="{}")
     turn_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # The label the chat list shows. Set once from the first user message
+    # (chat.py's _save_transcript), renameable via PATCH /chat/sessions/{id};
+    # null means the conversation never completed a turn.
+    title: Mapped[Optional[str]] = mapped_column(String(120))
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     __table_args__ = (
         # sessions.py clamps the counter before writing; the constraint is what
         # makes that a rule of the table rather than a habit of one caller.
         CheckConstraint("turn_count >= 0", name="ck_assistant_sessions_turn_count"),
+    )
+
+
+class AssistantMessage(Base, TimestampMixin):
+    """One row per chat message, so a conversation survives a reload and a
+    returning traveller picks up where they left off.
+
+    Kept apart from assistant_sessions on purpose: that row is the *plan* —
+    upserted, small, constant-size — while this table is the *transcript*, which
+    only ever appends. No foreign key between them either, because a stateless
+    turn writes messages before any plan row exists, and neither store should
+    fail because the other has not written yet.
+
+    `payload` carries whatever streamed alongside the reply (citation list, the
+    grounded trip ids, quick-reply chips, which provider/model answered) as one
+    JSONB blob for the same reason assistant_sessions.state is one: the shape
+    belongs to the assistant and moves with the conversational design. Trips are
+    stored as ids and re-read from the catalogue on load, so a title edit or a
+    price change shows current data rather than a stale copy.
+    """
+
+    __tablename__ = "assistant_messages"
+
+    id: Mapped[uuid.UUID] = _pk()
+    # Same browser-minted id assistant_sessions keys on — varchar(64), unauthenticated.
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Explicit per-conversation ordering: two rows written in one turn share a
+    # created_at down to the clock's resolution, and "user then assistant" must
+    # never depend on a timestamp tie-break.
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(nullable=False, server_default="{}")
+
+    __table_args__ = (
+        CheckConstraint("role in ('user', 'assistant')", name="ck_assistant_messages_role"),
+        CheckConstraint("seq >= 0", name="ck_assistant_messages_seq"),
+        # The one read path is "this conversation, in order" — one composite index
+        # serves it and the max(seq) lookup the writer does.
+        Index("ix_assistant_messages_session_seq", "session_id", "seq"),
     )
 
 
