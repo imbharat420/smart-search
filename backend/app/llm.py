@@ -11,6 +11,7 @@ a swapped `base_url` is the only client involved.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Callable, Optional
 
@@ -117,6 +118,35 @@ def _brief(exc: Exception) -> str:
     return text if len(text) <= 200 else text[:197] + "..."
 
 
+# --- Cooldown ----------------------------------------------------------
+# An account-level failure (bad/exhausted key, retired model) won't clear on
+# its own retry — without this every turn re-discovers the same dead provider
+# first, paying its round-trip before falling through to a live one.
+
+_COOLDOWN_STATUSES = {401, 402, 404, 410}
+_COOLDOWN_SECONDS = 600
+_cooldown_until: dict[str, float] = {}
+
+
+def _in_cooldown(name: str) -> bool:
+    until = _cooldown_until.get(name)
+    return until is not None and time.monotonic() < until
+
+
+def _mark_cooldown(provider: Provider, exc: Exception) -> None:
+    if getattr(exc, "status_code", None) in _COOLDOWN_STATUSES:
+        _cooldown_until[provider.name] = time.monotonic() + _COOLDOWN_SECONDS
+
+
+def _ordered(providers: list[Provider]) -> list[Provider]:
+    """Drop providers currently in cooldown. If that would leave none at all
+    (e.g. every provider cooling at once), try the full chain anyway rather
+    than giving up early — a wrong cooldown must never be the reason chat
+    stops working."""
+    live = [p for p in providers if not _in_cooldown(p.name)]
+    return live or providers
+
+
 # --- Chat ------------------------------------------------------------------
 
 async def stream_chat(
@@ -132,7 +162,7 @@ async def stream_chat(
     that dies mid-reply raises, since restarting would duplicate text the
     client has already rendered.
     """
-    providers = chat_providers()
+    providers = _ordered(chat_providers())
     if not providers:
         raise NoProviderConfigured(missing_key_hint())
 
@@ -155,12 +185,14 @@ async def stream_chat(
                 if not produced:
                     produced = True
                     log.info("chat served by %s (%s)", provider.label, provider.chat_model)
+                    _cooldown_until.pop(provider.name, None)
                     if on_provider:
                         on_provider(provider)
                 yield delta
         except Exception as exc:  # noqa: BLE001 — any failure means "try the next one"
             if produced:
                 raise
+            _mark_cooldown(provider, exc)
             attempts.append((provider.name, _brief(exc)))
             log.warning("chat provider %s failed, falling back: %s", provider.name, _brief(exc))
             continue
@@ -187,7 +219,7 @@ async def embed(
     aren't comparable, so anything querying an existing index must reuse the
     provider that built it rather than falling through the chain.
     """
-    chain = [provider] if provider is not None else embed_providers()
+    chain = [provider] if provider is not None else _ordered(embed_providers())
     if not chain:
         raise NoProviderConfigured(
             "no embedding-capable provider configured "
@@ -200,9 +232,11 @@ async def embed(
         try:
             vectors = await _embed_with(candidate, texts, input_type)
         except Exception as exc:  # noqa: BLE001
+            _mark_cooldown(candidate, exc)
             attempts.append((candidate.name, _brief(exc)))
             log.warning("embed provider %s failed: %s", candidate.name, _brief(exc))
             continue
+        _cooldown_until.pop(candidate.name, None)
         return candidate, vectors
 
     raise AllProvidersFailed(attempts)

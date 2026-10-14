@@ -36,6 +36,7 @@ reason — the useful half of an answer is worth more than a clean error.
 """
 from __future__ import annotations
 
+import asyncio
 import calendar
 import logging
 from typing import Any, AsyncGenerator, Optional
@@ -467,6 +468,7 @@ async def stream_chat(
     turn_error: Optional[str] = None
     reply_parts: list[str] = []
     grounded: list[Trip] = []
+    state: Optional[TripPlanState] = None
 
     try:
         span = turn.child("nlq.parse", "parser", inputs={"text": last_user})
@@ -488,30 +490,39 @@ async def stream_chat(
         yield ChatChunk(state=state)
 
         query = _retrieval_query(last_user, slot_patch, state)
-        span = turn.child(
-            "retrieve", "retriever",
-            inputs={"query": query, "plan": plan.summary_line(state) or None},
-        )
-        shortlist, mode, widened = await _candidates(
-            query, parsed, state, trips, promotions or [], synonyms or []
-        )
-        span.end(
-            outputs={"candidates": [t.title for t in shortlist], "mode": mode, "widened": widened},
-            region=state.region,
-        )
-        metrics.observe("retrieve", span.elapsed_ms)
+
+        async def _retrieve() -> tuple[list[Trip], str, list[str]]:
+            span = turn.child(
+                "retrieve", "retriever",
+                inputs={"query": query, "plan": plan.summary_line(state) or None},
+            )
+            shortlist, mode, widened = await _candidates(
+                query, parsed, state, trips, promotions or [], synonyms or []
+            )
+            span.end(
+                outputs={"candidates": [t.title for t in shortlist], "mode": mode, "widened": widened},
+                region=state.region,
+            )
+            metrics.observe("retrieve", span.elapsed_ms)
+            return shortlist, mode, widened
+
+        async def _policy() -> Optional[dict]:
+            # The policy lookup keeps the traveller's actual words: it is a keyword and
+            # embedding match over four documents, so a chip label simply matches none of
+            # them, which is the right answer for a turn that is not asking about policy.
+            span = turn.child("policy.retrieve", "retriever", inputs={"query": last_user})
+            found = await index.retrieve_policy(last_user)
+            span.end(outputs={"policy": found["label"] if found else None})
+            metrics.observe("policy.retrieve", span.elapsed_ms)
+            return found
+
+        # Neither depends on the other's result, so run them concurrently —
+        # this used to be two sequential awaits on the critical path.
+        (shortlist, mode, widened), policy = await asyncio.gather(_retrieve(), _policy())
         if widened:
             metrics.increment("widened_turns")
         if not shortlist:
             metrics.increment("zero_result_turns")
-
-        # The policy lookup keeps the traveller's actual words: it is a keyword and
-        # embedding match over four documents, so a chip label simply matches none of
-        # them, which is the right answer for a turn that is not asking about policy.
-        span = turn.child("policy.retrieve", "retriever", inputs={"query": last_user})
-        policy = await index.retrieve_policy(last_user)
-        span.end(outputs={"policy": policy["label"] if policy else None})
-        metrics.observe("policy.retrieve", span.elapsed_ms)
 
         # Reranking runs before the cards go out rather than after. Sending the
         # similarity order first and then reordering it would make the cards visibly
@@ -628,6 +639,13 @@ async def stream_chat(
     except Exception as exc:
         turn_error = f"{type(exc).__name__}: {exc}"
         metrics.increment("chat_turn_errors")
+        if state is not None:
+            # The plan already moved before this turn failed; save it so the
+            # traveller doesn't have to repeat themselves on retry.
+            try:
+                await _save_state(session_id, state)
+            except Exception:
+                log.exception("failed to persist plan state after turn error")
         raise
     finally:
         turn.finish(

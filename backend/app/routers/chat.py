@@ -7,6 +7,7 @@ as a truncated response the browser cannot distinguish from a network drop.
 from __future__ import annotations
 
 import json
+import logging
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -15,6 +16,7 @@ from ..chat import stream_chat
 from ..repository import Repo, get_repo
 from ..schemas import ChatChunk, ChatRequest
 
+log = logging.getLogger("traveliq.chat")
 router = APIRouter()
 
 
@@ -44,8 +46,9 @@ async def chat(req: ChatRequest, repo: Repo = Depends(get_repo)) -> StreamingRes
             ):
                 payload = json.dumps(chunk.model_dump(exclude_none=True))
                 yield f"data: {payload}\n\n"
-        except Exception as exc:  # surface errors to the client as a final chunk
-            err = ChatChunk(token=f"\n\n[assistant error: {exc}]", done=True)
+        except Exception:  # surface failure to the client without leaking internals
+            log.exception("chat turn failed")
+            err = ChatChunk(token="\n\n[assistant error: something went wrong generating a reply]", done=True)
             yield f"data: {json.dumps(err.model_dump(exclude_none=True))}\n\n"
 
     return StreamingResponse(

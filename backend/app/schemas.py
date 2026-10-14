@@ -261,7 +261,7 @@ class ChatChunk(BaseModel):
 
 class Message(BaseModel):
     role: str  # 'user' | 'assistant'
-    content: str
+    content: str = Field(max_length=8000)
 
 
 # ---- Admin ---------------------------------------------------------------
@@ -369,7 +369,7 @@ class EventRequest(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    messages: list[Message]
+    messages: list[Message] = Field(max_length=200)
     # Opaque per-conversation id, minted by the browser (see src/lib/sessionStore.ts).
     # Absent means "no memory" — the turn still answers, it just starts from an
     # empty plan, which is exactly how the endpoint behaved before state existed.

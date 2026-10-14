@@ -47,6 +47,8 @@ def engine() -> Optional[AsyncEngine]:
             # pre_ping the first query after waking fails instead of retrying.
             pool_pre_ping=True,
             pool_recycle=1800,
+            # Bounds every query so a stuck connection can't hang a request forever.
+            connect_args={"command_timeout": 15},
         )
         _sessions = async_sessionmaker(_engine, expire_on_commit=False)
         log.info("postgres engine ready (pool_size=%d)", settings.db_pool_size)
